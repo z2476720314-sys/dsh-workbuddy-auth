@@ -27,7 +27,7 @@ dsh plugin --profile web add dsh-workbuddy-auth@0.1.0
 
 npm 包是公开发布物，所以即使 GitHub 源码仓库保持 Private，用户仍可从 npm registry 正常安装；GitHub 可见性不参与 `npx` 安装流程。
 
-安装成功后重启正在运行的 `dsh web` 进程。`settings.yaml` 中的模型 provider 通常可热加载，但 Host/Client bundle 生命周期以 profile 重启为准。
+安装成功后，CLI 输出中的 `credentialPersistence: "DSH_HOME/.credentials.yaml"` 明确提示持久化位置（只显示安全相对路径，不显示用户名或 token）。重启正在运行的 `dsh web` 进程；`settings.yaml` 中的模型 provider 通常可热加载，但 Host/Client bundle 生命周期以 profile 重启为准。
 
 ## 更新
 
@@ -59,7 +59,9 @@ npx dsh-workbuddy-auth uninstall
 dsh plugin --profile web remove dsh-workbuddy-auth
 ```
 
-若 plugin remove 失败，`settings.yaml` 会恢复。provider 存在但 plugin 不存在时只删除 provider；plugin 存在时调用官方 remove；两者都不存在时返回 `already-uninstalled`，不备份、不写文件、不调用 remove，因此重复卸载幂等。卸载不删除或修改 CodeBuddy 凭据，也不处理已迁移后的用户 profile patch，因为 bundle patch 由 DSH 自动管理。
+若 plugin remove 失败，`settings.yaml` 会恢复。provider 存在但 plugin 不存在时只删除 provider；plugin 存在但 provider 不存在时直接调用官方 remove，且不备份、验证或重写 `settings.yaml`；两者都不存在时返回 `already-uninstalled`，不备份、不写文件、不调用 remove，因此重复卸载幂等。卸载不删除或修改 CodeBuddy 凭据，也不处理已迁移后的用户 profile patch，因为 bundle patch 由 DSH 自动管理。
+
+成功卸载输出包含 `credentialCleanupRequired: true`。运行期间调用 `ctx.credentials.set` 会在 `$DSH_HOME/.credentials.yaml` 创建或更新 `WORKBUDDY_ACCESS_TOKEN` 的**持久副本**；卸载默认不自动删除它，因为 CLI 无法安全证明该 key 的 ownership，也无法判断是否应恢复安装前的旧值。若不再需要该凭据，请使用 DSH 的凭据设置界面/凭据管理命令删除 `WORKBUDDY_ACCESS_TOKEN`；如果当前 DSH 版本没有相应入口，可在停止 DSH 后明确编辑 `$DSH_HOME/.credentials.yaml`，只删除 `WORKBUDDY_ACCESS_TOKEN` 对应项并保留其他凭据。CLI 不会读取或输出该值。
 
 ## 诊断
 
@@ -72,9 +74,10 @@ npx dsh-workbuddy-auth doctor
 - DSH 命令是否可用；
 - CodeBuddy 登录记录是否可解析；
 - 本插件拥有的 WorkBuddy provider 是否存在；
-- profile 是否同时安装并启用该 npm bundle。
+- profile 是否同时安装并启用该 npm bundle；
+- `credentialCleanupRequired: true`，提醒卸载后仍需由用户按上面的安全步骤处理 DSH 持久凭据副本。
 
-输出只包含布尔状态与 profile 名；不会输出 UID、token、凭据路径、DSH 路径或 Windows 用户名。
+输出只包含布尔状态、profile 名和固定清理提醒；不会读取或输出 UID、token、凭据路径、DSH 路径或 Windows 用户名。
 
 ## 选项
 
@@ -96,7 +99,8 @@ CLI 从 `%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\Tencent-Cloud.coding
 
 - `account.uid` 必须是非空字符串，只写入 `headers.X-User-Id`；
 - 只检查 `auth.accessToken` 是否存在，绝不打印、复制或写入 `settings.yaml`；
-- 运行时 Host 插件把当前 token 写入 DSH 凭据引用 `WORKBUDDY_ACCESS_TOKEN`，不会把 token 存进仓库。
+- 运行时 Host 插件把当前 token 写入 DSH 凭据引用 `WORKBUDDY_ACCESS_TOKEN`；`ctx.credentials.set` 会创建或更新 `$DSH_HOME/.credentials.yaml` 中的持久副本，但不会把 token 存进仓库；
+- CLI 不读取或打印 `$DSH_HOME/.credentials.yaml` 中的 token 值，卸载也不会因无法安全证明 ownership 而自动删除或恢复该 key。
 
 provider 固定包含 28 个模型，其中 19 个声明 `input: [text, image]`。写入流程为：
 
@@ -108,7 +112,7 @@ provider 固定包含 28 个模型，其中 19 个声明 `input: [text, image]`�
 
 CLI 对底层 fs/Node/YAML 错误只输出封闭错误码对应的固定文案；不会回显底层 message、绝对路径、Windows 用户名、UID 或 token。
 
-卸载读取 profile manifest 后分支处理：只在 provider 存在时备份并删 own block，只在 plugin/dependency 存在时调用 remove；两者都不存在则直接 no-op。失败会恢复 settings。
+卸载读取 profile manifest 后分支处理：只在 provider 存在时备份并删 own block，只在 plugin/dependency 存在时调用 remove；plugin-only 分支不触碰 settings，两者都不存在则直接 no-op。已修改 settings 的失败路径会恢复 settings。
 
 ## 功能摘要
 

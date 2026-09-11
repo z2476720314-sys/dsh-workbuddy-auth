@@ -4,9 +4,11 @@
 
 `dsh-workbuddy-auth` 在 Windows 当前用户权限下读取 WorkBuddy（腾讯 CodeBuddy）的本机登录态，并在需要续期时写回同一个凭据文件。该文件是**明文 JSON**，包含可用于访问账号的 access token 和 refresh token；它必须按密码对待。
 
+插件运行时调用 `ctx.credentials.set('WORKBUDDY_ACCESS_TOKEN', value)`，因此 DSH 还会在 `$DSH_HOME/.credentials.yaml` 创建或更新该 access token 的**持久副本**。安装成功输出使用固定安全相对路径 `DSH_HOME/.credentials.yaml` 披露这一点，不打印解析后的用户目录或 token。卸载默认不自动删除或恢复 `WORKBUDDY_ACCESS_TOKEN`：CLI 无法安全证明该 key 是否由本次安装独占，也无法恢复安装前可能存在的值；成功卸载及 `doctor` 都会输出 `credentialCleanupRequired: true`。
+
 请始终遵守：
 
-- 不要把 CodeBuddy 凭据文件、其内容、token、UID、手机号、邮箱、真实余额、DSH 配置、日志或备份提交到仓库。
+- 不要把 CodeBuddy 凭据文件、`$DSH_HOME/.credentials.yaml`、其内容、token、UID、手机号、邮箱、真实余额、DSH 配置、日志或备份提交到仓库。
 - 不要在 GitHub issue、discussion、pull request、commit message、CI 日志或截图中粘贴凭据、token 或未经脱敏的账号信息。
 - 不要把 npm automation/access token 或 GitHub PAT 写进脚本、配置、命令历史或问题报告；发布 npm 包时使用 npm 官方认证与最小权限 token。
 - 测试和复现只使用合成数据。可以提供脱敏 DTO 或虚构路径，但不能提供真实值。
@@ -35,7 +37,8 @@
 2. 退出 CodeBuddy 登录态，并按 CodeBuddy 当前提供的方式撤销相关登录或会话。
 3. **重新登录 CodeBuddy，让凭据完成轮换。** 仅删除 GitHub 文本、关闭 issue 或覆盖本地文件不能使已泄露的 token 失效。
 4. 重启相关 DSH Web 进程，确认其重新读取轮换后的登录态。
-5. 若敏感值曾进入 Git 历史、CI artifact、终端记录或聊天系统，分别按对应平台流程清理；在完成轮换前都应视为仍然泄露。
+5. 使用 DSH 的凭据设置界面/凭据管理命令删除持久的 `WORKBUDDY_ACCESS_TOKEN`；若当前版本没有相应入口，先停止 DSH，再明确编辑 `$DSH_HOME/.credentials.yaml`，只删除该 key 并保留其他凭据。不要用本 CLI 读取或输出其值。
+6. 若敏感值曾进入 Git 历史、CI artifact、终端记录或聊天系统，分别按对应平台流程清理；在完成轮换前都应视为仍然泄露。
 
 若 GitHub PAT 同时暴露，应在 GitHub 单独撤销/轮换该 PAT；CodeBuddy 重新登录不会轮换 GitHub 凭据。
 
@@ -47,5 +50,6 @@
 - User-Agent workaround 是当前 DSH Host 进程内对 `globalThis.fetch` 的包装；它仅精确匹配 WorkBuddy 上游 hostname，但仍是进程级行为。
 - WorkBuddy 推理、积分和续期接口不是稳定的公开 API，上游变更可能破坏当前假设。
 - 原子写回失败时会尝试清理临时凭据文件；若写入和清理同时失败，仍可能留下含新凭据的临时文件。
+- DSH 持久凭据副本不会随插件卸载自动删除。CLI 只输出固定清理提醒，绝不读取或回显该值；用户需按上文通过 DSH 凭据管理入口或停服后明确编辑文件完成清理。
 
 安装器和卸载器只管理带 ownership 标记的 WorkBuddy provider；profile bundle 由官方 `dsh plugin` 命令管理。为兼容旧 PowerShell 安装，CLI 只会备份并迁移精确带旧 ownership markers 的 profile patch 块；无标记同 ID 或畸形标记一律拒绝。CLI 不覆盖未知 provider，不删除 CodeBuddy 登录态，也不清理来源不明的 DSH 凭据。详细边界见 [README.md](README.md)。

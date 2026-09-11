@@ -30,6 +30,7 @@ const PACKAGE_NAME = 'dsh-workbuddy-auth'
 const PACKAGE_VERSION = JSON.parse(await readFile(new URL('../package.json', import.meta.url), 'utf8')).version
 const DEFAULT_PACKAGE_SPEC = `${PACKAGE_NAME}@${PACKAGE_VERSION}`
 const SAFE_CREDENTIAL_DISPLAY = String.raw`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\Tencent-Cloud.coding-copilot.info`
+const CREDENTIAL_PERSISTENCE_DISPLAY = 'DSH_HOME/.credentials.yaml'
 const USAGE = `Usage: dsh-workbuddy-auth <install|uninstall|doctor> [--profile <name>] [--dry-run] [--package-spec <spec>]`
 
 const ERROR_MESSAGES = Object.freeze({
@@ -41,7 +42,9 @@ const ERROR_MESSAGES = Object.freeze({
   PLUGIN_ADD_FAILED: 'DSH plugin add failed; settings were not changed.',
   PLUGIN_ADD_ROLLBACK_FAILED: 'DSH plugin add failed and rollback was incomplete; restore the legacy profile patch from this run\'s backup.',
   PLUGIN_REMOVE_FAILED: 'DSH plugin remove failed; settings were rolled back.',
+  PLUGIN_ONLY_REMOVE_FAILED: 'DSH plugin remove failed; settings were not changed.',
   INSTALL_FAILED: 'Installation failed; prior configuration was restored where possible.',
+  INSTALL_ROLLBACK_INCOMPLETE: 'Installation failed and plugin rollback was incomplete; remove dsh-workbuddy-auth from the selected profile manually.',
   INSTALL_FAILED_DEPENDENCY_PRESERVED: 'Installation failed; prior configuration was restored and the existing dependency was preserved for manual review.',
   UNINSTALL_FAILED: 'Uninstallation failed; prior configuration was restored where possible.',
   OPERATION_FAILED: 'Operation failed; no credential or path details were printed.',
@@ -308,12 +311,17 @@ async function install(options, deps, paths) {
       try { await deps.fs.restoreProfilePatch(paths.profilePatchPath, backupDir) } catch { failures.push('profile patch rollback') }
     }
     if (!dependencyExisted) {
-      const remove = await deps.runDsh(['plugin', '--profile', options.profile, 'remove', PACKAGE_NAME])
-      if (remove.code !== 0) failures.push('plugin rollback')
+      try {
+        const remove = await deps.runDsh(['plugin', '--profile', options.profile, 'remove', PACKAGE_NAME])
+        if (remove.code !== 0) failures.push('plugin rollback')
+      } catch {
+        failures.push('plugin rollback')
+      }
     }
+    if (failures.includes('plugin rollback')) fail('INSTALL_ROLLBACK_INCOMPLETE')
     fail(dependencyExisted ? 'INSTALL_FAILED_DEPENDENCY_PRESERVED' : 'INSTALL_FAILED')
   }
-  deps.stdout.write(JSON.stringify({ status: 'installed', profile: options.profile, restartRequired: true }) + '\n')
+  deps.stdout.write(JSON.stringify({ status: 'installed', profile: options.profile, restartRequired: true, credentialPersistence: CREDENTIAL_PERSISTENCE_DISPLAY }) + '\n')
   return 0
 }
 
@@ -325,7 +333,22 @@ async function uninstall(options, deps, paths) {
   const providerExists = editor.hasManagedProvider(original)
   if (!providerExists && editor.hasProviderConflict?.(original)) fail('CONFIG_CONFLICT')
   if (!providerExists && !pluginExists) {
-    deps.stdout.write(JSON.stringify({ status: 'already-uninstalled', profile: options.profile }) + '\n')
+    deps.stdout.write(JSON.stringify({ status: 'already-uninstalled', profile: options.profile, credentialCleanupRequired: true }) + '\n')
+    return 0
+  }
+  if (!providerExists) {
+    if (options.dryRun) {
+      deps.stdout.write(JSON.stringify({ status: 'dry-run', command: 'uninstall', profile: options.profile }) + '\n')
+      return 0
+    }
+    let remove
+    try {
+      remove = await deps.runDsh(['plugin', '--profile', options.profile, 'remove', PACKAGE_NAME])
+    } catch {
+      fail('PLUGIN_ONLY_REMOVE_FAILED')
+    }
+    if (remove.code !== 0) fail('PLUGIN_ONLY_REMOVE_FAILED')
+    deps.stdout.write(JSON.stringify({ status: 'uninstalled', profile: options.profile, restartRequired: true, credentialCleanupRequired: true }) + '\n')
     return 0
   }
   let next
@@ -357,7 +380,7 @@ async function uninstall(options, deps, paths) {
     if (error instanceof CliError && error.code === 'PLUGIN_REMOVE_FAILED') throw error
     fail('UNINSTALL_FAILED')
   }
-  deps.stdout.write(JSON.stringify({ status: 'uninstalled', profile: options.profile, restartRequired: true }) + '\n')
+  deps.stdout.write(JSON.stringify({ status: 'uninstalled', profile: options.profile, restartRequired: true, credentialCleanupRequired: true }) + '\n')
   return 0
 }
 
@@ -379,7 +402,7 @@ async function doctor(options, deps, paths) {
     provider = editor.hasManagedProvider(await deps.fs.readSettings(paths.settingsPath))
   } catch {}
   plugin = isPluginInstalled(await loadProfileManifest(paths.profilePath))
-  deps.stdout.write(JSON.stringify({ dsh, codebuddyLogin, provider, plugin, profile: options.profile }) + '\n')
+  deps.stdout.write(JSON.stringify({ dsh, codebuddyLogin, provider, plugin, profile: options.profile, credentialCleanupRequired: true }) + '\n')
   return dsh && codebuddyLogin && provider && plugin ? 0 : 1
 }
 

@@ -1010,6 +1010,46 @@ test('createRouteDeps：刷新与 tick 共用同一份在飞标记，慢刷新�
   assert.equal(fetchImpl.calls.length, 0, '在飞期间必须零新增网络调用（每次刷新都是一次不可逆轮换）')
 })
 
+test('createRouteDeps：并发重新读取与其他同步共用 guard，busy 固定拒绝且不启动第二次同步', async () => {
+  const { createRouteDeps } = await import('../lib/index.mjs')
+  const soon = JSON.stringify({
+    account: { uid: 'u1' },
+    auth: { accessToken: FAKE_TOKEN, refreshToken: FAKE_REFRESH, expiresAt: Date.now() + 90 * 864e5 },
+  })
+  let release
+  const blocked = new Promise((resolve) => { release = resolve })
+  let reads = 0
+  let refreshes = 0
+  const syncDeps = {
+    readFile: async () => {
+      reads += 1
+      if (reads === 1) await blocked
+      return soon
+    },
+    refresh: async () => { refreshes += 1; throw new Error('refresh should not run') },
+    writeFile: async () => {},
+    setCredential: async () => {},
+    guard: { inFlight: undefined },
+  }
+  const deps = createRouteDeps({ credentials: { set: async () => {} } }, {}, async () => { throw new Error('fetch should not run') }, syncDeps)
+
+  const first = deps.reloadSeam()
+  await new Promise((resolve) => setImmediate(resolve))
+  try {
+    await assert.rejects(() => deps.reloadSeam(), (error) => {
+      assert.equal(error.code, 'SYNC_IN_FLIGHT')
+      assert.equal(error.message, 'credential sync already in flight')
+      assertNoSecret(error.message, '重新读取在飞拒绝的错误消息')
+      return true
+    })
+    assert.equal(reads, 1, 'busy 分支不得开始第二次凭据读取')
+    assert.equal(refreshes, 0, 'busy 分支不得开始第二次刷新')
+  } finally {
+    release()
+    await first
+  }
+})
+
 test('createRouteDeps：重新读取会同步到凭据 seam，返回值不含令牌', async () => {
   const { createRouteDeps, createSyncDeps } = await import('../lib/index.mjs')
   const file = await writeTempCredential()

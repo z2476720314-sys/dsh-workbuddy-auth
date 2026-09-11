@@ -172,6 +172,12 @@ test('install invokes official dsh plugin add and writes the owned 28-model prov
   const provider = yaml.parse(settings)['llm-pi-ai'].providers.workbuddy
   assert.equal(provider.models.length, 28)
   assert.equal(provider.models.filter((model) => Array.isArray(model.input)).length, 19)
+  assert.deepEqual(JSON.parse(f.output.join('').trim()), {
+    status: 'installed',
+    profile: 'web',
+    restartRequired: true,
+    credentialPersistence: 'DSH_HOME/.credentials.yaml',
+  })
   assertPrivateOutput(f)
 })
 
@@ -421,6 +427,40 @@ test('settings failure restores settings and removes only a plugin newly install
   assertPrivateOutput(f)
 })
 
+test('settings failure reports fixed incomplete rollback when newly-added plugin remove exits nonzero', async () => {
+  const f = await fixture({ failValidationAt: 2 })
+  const baseRun = f.deps.runDsh
+  f.deps.runDsh = async (args) => {
+    if (args.includes('remove')) {
+      f.calls.push([...args])
+      return { code: 37, stdout: f.root, stderr: TOKEN }
+    }
+    return baseRun(args)
+  }
+
+  assert.equal(await main(['install'], f.deps), 1)
+  assert.equal(allOutput(f), 'dsh-workbuddy-auth: Installation failed and plugin rollback was incomplete; remove dsh-workbuddy-auth from the selected profile manually.\n')
+  assert.equal(f.calls.filter((args) => args.includes('remove')).length, 1)
+  assertPrivateOutput(f)
+})
+
+test('settings failure reports the same fixed incomplete rollback when newly-added plugin remove throws', async () => {
+  const f = await fixture({ failValidationAt: 2 })
+  const baseRun = f.deps.runDsh
+  f.deps.runDsh = async (args) => {
+    if (args.includes('remove')) {
+      f.calls.push([...args])
+      throw new Error(`synthetic remove failure ${f.root} ${TOKEN}`)
+    }
+    return baseRun(args)
+  }
+
+  assert.equal(await main(['install'], f.deps), 1)
+  assert.equal(allOutput(f), 'dsh-workbuddy-auth: Installation failed and plugin rollback was incomplete; remove dsh-workbuddy-auth from the selected profile manually.\n')
+  assert.equal(f.calls.filter((args) => args.includes('remove')).length, 1)
+  assertPrivateOutput(f)
+})
+
 test('settings failure does not remove a dependency-only package that existed before this install', async () => {
   const f = await fixture({
     failValidationAt: 2,
@@ -473,6 +513,12 @@ test('uninstall removes only the owned provider before official plugin remove', 
   assert.deepEqual(f.calls.filter((args) => args[0] === 'plugin'), [
     ['plugin', '--profile', 'web', 'remove', 'dsh-workbuddy-auth'],
   ])
+  assert.deepEqual(JSON.parse(f.output.join('').trim()), {
+    status: 'uninstalled',
+    profile: 'web',
+    restartRequired: true,
+    credentialCleanupRequired: true,
+  })
   assertPrivateOutput(f)
 })
 
@@ -525,6 +571,49 @@ test('uninstall with no owned provider still invokes plugin remove without chang
   assert.equal(f.calls.filter((args) => args.includes('remove')).length, 1)
 })
 
+test('plugin-only uninstall succeeds when settings is read-only without backup, validation or rewrite', async () => {
+  const f = await fixture({
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.1.0' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+  })
+  const before = await readFile(f.settingsPath, 'utf8')
+  let replaceCalls = 0
+  let restoreCalls = 0
+  f.deps.fs.backupSettings = async () => { throw new Error(`settings must not be backed up ${f.root}`) }
+  f.deps.fs.replaceSettingsAtomically = async () => { replaceCalls += 1; throw new Error('settings must not be rewritten') }
+  f.deps.fs.restoreSettings = async () => { restoreCalls += 1; throw new Error('settings must not be restored') }
+  f.deps.validateSettingsText = async () => { throw new Error('settings must not be validated') }
+
+  assert.equal(await main(['uninstall'], f.deps), 0)
+  assert.equal(await readFile(f.settingsPath, 'utf8'), before)
+  assert.equal(replaceCalls, 0)
+  assert.equal(restoreCalls, 0)
+  assert.deepEqual(f.calls.filter((args) => args.includes('remove')), [
+    ['plugin', '--profile', 'web', 'remove', 'dsh-workbuddy-auth'],
+  ])
+  assertPrivateOutput(f)
+})
+
+test('plugin-only uninstall remove failures report settings unchanged for nonzero and throw', async () => {
+  for (const mode of ['nonzero', 'throw']) {
+    const f = await fixture({
+      profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.1.0' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    })
+    const before = await readFile(f.settingsPath, 'utf8')
+    f.deps.runDsh = async (args) => {
+      f.calls.push([...args])
+      if (args[0] === '--version') return { code: 0, stdout: '0.1.5', stderr: '' }
+      if (mode === 'throw') throw new Error(`synthetic remove failure ${f.root} ${TOKEN}`)
+      return { code: 41, stdout: f.root, stderr: TOKEN }
+    }
+
+    assert.equal(await main(['uninstall'], f.deps), 1)
+    assert.equal(allOutput(f), 'dsh-workbuddy-auth: DSH plugin remove failed; settings were not changed.\n')
+    assert.equal(await readFile(f.settingsPath, 'utf8'), before)
+    assert.equal(f.deps.fs.backupSettingsCalls ?? 0, 0)
+    assertPrivateOutput(f)
+  }
+})
+
 test('uninstall without a plugin still rejects unmarked or malformed provider ownership', async () => {
   const cases = [
     'llm-pi-ai:\n  providers:\n    workbuddy:\n      displayName: Manual\n',
@@ -553,7 +642,7 @@ test('doctor is read-only and reports DSH, login, provider and bundle status wit
   assert.equal(await readFile(f.settingsPath, 'utf8'), settingsBefore)
   assert.equal(await readFile(f.profilePath, 'utf8'), profileBefore)
   const report = JSON.parse(f.output.join('').trim())
-  assert.deepEqual(report, { dsh: true, codebuddyLogin: true, provider: true, plugin: true, profile: 'web' })
+  assert.deepEqual(report, { dsh: true, codebuddyLogin: true, provider: true, plugin: true, profile: 'web', credentialCleanupRequired: true })
   assertPrivateOutput(f)
 })
 
@@ -562,7 +651,7 @@ test('doctor reports plugin false instead of throwing when the profile is missin
   await rm(f.profileDir, { recursive: true, force: true })
 
   assert.equal(await main(['doctor'], f.deps), 1)
-  assert.deepEqual(JSON.parse(f.output.join('').trim()), { dsh: true, codebuddyLogin: true, provider: true, plugin: false, profile: 'web' })
+  assert.deepEqual(JSON.parse(f.output.join('').trim()), { dsh: true, codebuddyLogin: true, provider: true, plugin: false, profile: 'web', credentialCleanupRequired: true })
   assert.equal(f.errors.length, 0)
   assertPrivateOutput(f)
 })
