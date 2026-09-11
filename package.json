@@ -1,0 +1,57 @@
+{
+  "name": "dsh-workbuddy-auth",
+  "version": "0.1.0",
+  "type": "module",
+  "description": "把本机 WorkBuddy（CodeBuddy）登录态桥接为 DSH 凭据引用 WORKBUDDY_ACCESS_TOKEN",
+  "main": "lib/index.mjs",
+  "exports": {
+    ".": "./lib/index.mjs",
+    "./client": "./lib/client.js",
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "dsh-workbuddy-auth": "./bin/cli.mjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "slots"
+      ]
+    }
+  },
+  "files": [
+    "bin/*.mjs",
+    "lib/*.mjs",
+    "lib/client.js",
+    "cordis.patch.yml",
+    "README.md",
+    "LICENSE",
+    "SECURITY.md"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/z2476720314-sys/dsh-workbuddy-auth.git"
+  },
+  "homepage": "https://github.com/z2476720314-sys/dsh-workbuddy-auth#readme",
+  "bugs": {
+    "url": "https://github.com/z2476720314-sys/dsh-workbuddy-auth/issues"
+  },
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "workbuddy",
+    "codebuddy"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test \"test/*.test.mjs\" test/client-smoke.mjs"
+  }
+}

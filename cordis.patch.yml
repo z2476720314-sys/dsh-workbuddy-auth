@@ -1,0 +1,6 @@
+# dsh-workbuddy-auth bundle layer. The package itself is dual-face:
+# this Cordis row activates its Host entry, while dsh.client metadata lets the
+# Web modules service discover and load ./client from the same installed row.
+- insert:
+    - id: dsh-workbuddy-auth
+      name: dsh-workbuddy-auth
