@@ -10,7 +10,7 @@
     "./package.json": "./package.json"
   },
   "bin": {
-    "dsh-workbuddy-auth": "./bin/cli.mjs"
+    "dsh-workbuddy-auth": "bin/cli.mjs"
   },
   "dsh": {
     "bundle": {
