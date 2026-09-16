@@ -3,6 +3,16 @@
 本文件记录 dsh-workbuddy-auth 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] - 2026-09-16
+
+### 修复
+
+- **去重保留策略改为 mtime 最新优先**：备份文件里的 xpiresAt 可能是伪造的远期值
+  （真实回归：一份 7 月备份写着 2027 年到期，token 实际早已被服务端作废——旧策略按
+  「expiresAt 最大者保留」恰好选中它，切换后推理持续 401）。mtime 相差 2 秒内视为同分，
+  回退到 expiresAt 比较。mtime 在 DTO 中不输出。
+- **已过期账号从可切换列表剔除**：唯一一份凭据且已过期的账号不再出现（点了必 401）。
+  xpiresAt=0（上游未提供）保守保留。
 ## [0.2.1] - 2026-09-16
 
 ### 修复

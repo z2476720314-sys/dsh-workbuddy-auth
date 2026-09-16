@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbuddy-auth",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "type": "module",
   "description": "把本机 WorkBuddy（CodeBuddy）登录态桥接为 DSH 凭据引用 WORKBUDDY_ACCESS_TOKEN",
   "main": "lib/index.mjs",

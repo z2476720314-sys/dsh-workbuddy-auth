@@ -80,7 +80,7 @@ async function fixture(options = {}) {
       const selectedProfile = args[args.indexOf('--profile') + 1]
       const selectedProfilePath = join(dshHome, 'profiles', selectedProfile, 'package.json')
       const manifest = JSON.parse(await readFile(selectedProfilePath, 'utf8'))
-      manifest.dependencies['dsh-workbuddy-auth'] = options.packageSpec ?? '0.2.1'
+      manifest.dependencies['dsh-workbuddy-auth'] = options.packageSpec ?? '0.2.2'
       if (!manifest.dsh.profile.bundles.includes('dsh-workbuddy-auth')) manifest.dsh.profile.bundles.push('dsh-workbuddy-auth')
       await writeFile(selectedProfilePath, JSON.stringify(manifest, null, 2), 'utf8')
     }
@@ -194,9 +194,9 @@ test('fresh profile install calls plugin add before inspecting add-created profi
   f.deps.runDsh = async (args) => {
     f.calls.push([...args])
     if (args[0] === '--version') return { code: 0, stdout: '0.1.5', stderr: '' }
-    assert.deepEqual(args, ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.1'])
+    assert.deepEqual(args, ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.2'])
     await mkdir(f.profileDir, { recursive: true })
-    await writeFile(f.profilePath, JSON.stringify({ dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } }), 'utf8')
+    await writeFile(f.profilePath, JSON.stringify({ dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } }), 'utf8')
     await writeFile(f.profilePatchPath, '- insert:\n    - id: dsh-workbuddy-auth\n      name: dsh-workbuddy-auth\n', 'utf8')
     return { code: 0, stdout: '', stderr: '' }
   }
@@ -204,9 +204,9 @@ test('fresh profile install calls plugin add before inspecting add-created profi
   assert.equal(await main(['install'], f.deps), 0)
   assert.deepEqual(f.calls, [
     ['--version'],
-    ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.1'],
+    ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.2'],
   ])
-  assert.equal(JSON.parse(await readFile(f.profilePath, 'utf8')).dependencies['dsh-workbuddy-auth'], '0.2.1')
+  assert.equal(JSON.parse(await readFile(f.profilePath, 'utf8')).dependencies['dsh-workbuddy-auth'], '0.2.2')
   assert.equal(settingsEditor.hasManagedProvider(await readFile(f.settingsPath, 'utf8')), true)
   assertPrivateOutput(f)
 })
@@ -238,7 +238,7 @@ test('install rolls back a newly added plugin when add does not create readable 
   assert.equal(await main(['install'], f.deps), 1)
   assert.deepEqual(f.calls, [
     ['--version'],
-    ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.1'],
+    ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.2'],
     ['plugin', '--profile', 'web', 'remove', 'dsh-workbuddy-auth'],
   ])
   assert.match(allOutput(f), /plugin add failed/i)
@@ -428,7 +428,7 @@ test('settings failure restores settings and removes only a plugin newly install
   assert.equal(await main(['install'], f.deps), 1)
   assert.equal(await readFile(f.settingsPath, 'utf8'), before)
   assert.deepEqual(f.calls.filter((args) => args[0] === 'plugin'), [
-    ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.1'],
+    ['plugin', '--profile', 'web', 'add', 'dsh-workbuddy-auth@0.2.2'],
     ['plugin', '--profile', 'web', 'remove', 'dsh-workbuddy-auth'],
   ])
   assertPrivateOutput(f)
@@ -481,7 +481,7 @@ test('settings failure does not remove a dependency-only package that existed be
 test('settings failure does not remove a plugin that existed before this install', async () => {
   const f = await fixture({
     failValidationAt: 2,
-    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
   })
   assert.equal(await main(['install'], f.deps), 1)
   assert.equal(f.calls.filter((args) => args.includes('remove')).length, 0)
@@ -507,7 +507,7 @@ test('uninstall removes only the owned provider before official plugin remove', 
   const installed = settingsEditor.setManagedProvider(BASE_SETTINGS, UID)
   const f = await fixture({
     settings: installed,
-    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
   })
   const snapshots = []
   const baseRun = f.deps.runDsh
@@ -535,7 +535,7 @@ test('failed plugin remove rolls settings back', async () => {
   const installed = settingsEditor.setManagedProvider(BASE_SETTINGS, UID)
   const f = await fixture({
     settings: installed,
-    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
   })
   f.deps.runDsh = async (args) => {
     f.calls.push([...args])
@@ -561,7 +561,7 @@ test('second uninstall is an already-uninstalled no-op without backup or remove'
   const installed = settingsEditor.setManagedProvider(BASE_SETTINGS, UID)
   const f = await fixture({
     settings: installed,
-    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
   })
   assert.equal(await main(['uninstall'], f.deps), 0)
   const backupCallsAfterFirst = f.deps.fs.backupSettingsCalls ?? 0
@@ -573,7 +573,7 @@ test('second uninstall is an already-uninstalled no-op without backup or remove'
 
 test('uninstall with no owned provider still invokes plugin remove without changing settings', async () => {
   const f = await fixture({
-    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
   })
   assert.equal(await main(['uninstall'], f.deps), 0)
   assert.equal(await readFile(f.settingsPath, 'utf8'), BASE_SETTINGS)
@@ -582,7 +582,7 @@ test('uninstall with no owned provider still invokes plugin remove without chang
 
 test('plugin-only uninstall succeeds when settings is read-only without backup, validation or rewrite', async () => {
   const f = await fixture({
-    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
   })
   const before = await readFile(f.settingsPath, 'utf8')
   let replaceCalls = 0
@@ -605,7 +605,7 @@ test('plugin-only uninstall succeeds when settings is read-only without backup, 
 test('plugin-only uninstall remove failures report settings unchanged for nonzero and throw', async () => {
   for (const mode of ['nonzero', 'throw']) {
     const f = await fixture({
-      profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+      profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
     })
     const before = await readFile(f.settingsPath, 'utf8')
     f.deps.runDsh = async (args) => {
@@ -642,7 +642,7 @@ test('uninstall without a plugin still rejects unmarked or malformed provider ow
 
 test('doctor is read-only and reports DSH, login, provider and bundle status without private output', async () => {
   const installed = settingsEditor.setManagedProvider(BASE_SETTINGS, UID)
-  const manifest = { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } }
+  const manifest = { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } }
   const f = await fixture({ settings: installed, profileManifest: manifest })
   const settingsBefore = await readFile(f.settingsPath, 'utf8')
   const profileBefore = await readFile(f.profilePath, 'utf8')
@@ -691,7 +691,7 @@ test('dry-run uninstall validates removal without invoking remove or changing se
   const installed = settingsEditor.setManagedProvider(BASE_SETTINGS, UID)
   const f = await fixture({
     settings: installed,
-    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.1' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
+    profileManifest: { dependencies: { 'dsh-workbuddy-auth': '0.2.2' }, dsh: { profile: { bundles: ['dsh-workbuddy-auth'] } } },
   })
   assert.equal(await main(['uninstall', '--dry-run'], f.deps), 0)
   assert.deepEqual(f.calls, [['--version']])
@@ -706,7 +706,7 @@ test('custom profile is forwarded to add and used for doctor inspection', async 
   await writeFile(join(customDir, 'package.json'), JSON.stringify({ dependencies: {}, dsh: { profile: { bundles: [] } } }), 'utf8')
   await writeFile(join(customDir, 'cordis.patch.yml'), '- keep: custom\n', 'utf8')
   assert.equal(await main(['install', '--profile', 'custom'], f.deps), 0)
-  assert.deepEqual(f.calls.at(-1), ['plugin', '--profile', 'custom', 'add', 'dsh-workbuddy-auth@0.2.1'])
+  assert.deepEqual(f.calls.at(-1), ['plugin', '--profile', 'custom', 'add', 'dsh-workbuddy-auth@0.2.2'])
 })
 
 test('profile rejects cmd metacharacters and dot segments before filesystem or dsh access', async () => {
