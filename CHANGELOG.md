@@ -3,6 +3,16 @@
 本文件记录 dsh-workbuddy-auth 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-09-16
+
+### 修复
+
+- **「当前」徽章标错账号**：切换账号后，状态卡的 ctiveId 仍停留在初始账号（激活路径存在
+  外层 current 与 selector 内部 ctiveFile 两个状态源，切换只更新了前者）。现在 selector
+  内部状态是唯一真值，徽章始终跟随真实激活的凭据文件。
+- **同一账号出现重复按钮**：桌面端的时间戳备份（如 workbuddy-desktop.<时间戳>.info）与正式
+  凭据文件是同一账号且可能已过期，此前会并列出现两个一模一样的切换按钮，点进过期备份必然 401。
+  现在列表按账号（uid + 手机号 + 昵称）去重，保留未过期、ccessExpiresAt 最新的一份。
 ## [0.2.0] - 2026-09-16
 
 ### 新增

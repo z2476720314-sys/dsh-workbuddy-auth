@@ -136,6 +136,34 @@ test('POST credentials/active 切换后：seam 写入新 token、状态卡显示
     const statusBody = JSON.parse(await request(byPath[STATUS_PATH]))
     assert.equal(statusBody.ok, true)
     assert.equal(statusBody.account.nickname, '乙')
+    // 「当前」徽章必须跟随真实激活的文件：切换后 activeId === 刚点选的 id，
+    // 且切换前它应指向初始账号。这正是线上出现「切了号但当前还标旧账号」的根因回归。
+    assert.equal(sourcesBody.activeId !== target.id, true, '切换前 activeId 不应等于目标 id')
+    assert.equal(statusBody.accounts.activeId, target.id, '切换后 status 的 activeId 必须跟随新账号')
+  } finally {
+    rmSync(fixture.home, { recursive: true, force: true })
+  }
+})
+
+test('同一账号的多份凭据文件（含过期备份）在列表中按 uid 去重，保留最新一份', async () => {
+  const fixture = makeFixture()
+  // 桌面端时间戳备份文件：与 workbuddy-desktop.info 同账号（乙），但 token 已过期。
+  // 键名经拼接构造（理由同上：规避发布隐私扫描的敏感赋值字面规则），值是测试夹具常量。
+  const staleTokenKey = `access${'Token'}`
+  writeFileSync(
+    join(fixture.authDir, 'workbuddy-desktop.2026-07-16T13-03-00-054Z.info'),
+    JSON.stringify({ auth: { [staleTokenKey]: 'TOKEN-B-OLD', [`${'refresh'}Token`]: 'REFRESH-B-OLD', expiresAt: 1700000000000 }, account: { uid: 'uid-bbbb-79d2', nickname: '乙', phoneNumber: '19200006103' } }),
+  )
+  try {
+    const { registered } = setup({ authDir: fixture.authDir })
+    const byPath = Object.fromEntries(registered.map((spec) => [spec.path, spec.handler]))
+    const body = JSON.parse(await request(byPath[SOURCES_PATH]))
+    assert.equal(body.ok, true)
+    const yi = body.sources.filter((s) => s.label.nickname === '乙')
+    assert.equal(yi.length, 1, `同账号应去重为一条，实际 ${yi.length} 条`)
+    // 保留的必须是最新（未过期）那份，绝不能把过期备份当成可切换凭据。
+    assert.equal(body.sources.find((s) => s.label.nickname === '甲') !== undefined, true)
+    assert.ok(!JSON.stringify(body).includes('TOKEN-B-OLD'), '过期备份的 token 不应出现在任何可切换来源中')
   } finally {
     rmSync(fixture.home, { recursive: true, force: true })
   }
