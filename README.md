@@ -18,10 +18,10 @@ npx dsh-workbuddy-auth install
 默认安装到 `web` profile。CLI 会先调用官方命令：
 
 ```powershell
-dsh plugin --profile web add dsh-workbuddy-auth@0.1.0
+dsh plugin --profile web add dsh-workbuddy-auth@0.2.0
 ```
 
-默认 package spec 从本包自己的 `package.json` 读取，固定为 `dsh-workbuddy-auth@0.1.0`，避免安装时漂移到未审计版本。DSH 根据本包的 `dsh.bundle.patch` 自动加入 Host 插件行；同一 package row 的 `dsh.client` 元数据会加载 Client 设置卡。
+默认 package spec 从本包自己的 `package.json` 读取，固定为 `dsh-workbuddy-auth@0.2.0`，避免安装时漂移到未审计版本。DSH 根据本包的 `dsh.bundle.patch` 自动加入 Host 插件行；同一 package row 的 `dsh.client` 元数据会加载 Client 设置卡。
 
 从旧 PowerShell 安装器一键升级时，直接运行同一条 `npx dsh-workbuddy-auth install` 即可同时迁移两处旧 ownership：CLI 会识别 `settings.yaml` 中精确、完整且唯一的四空格 `BEGIN/END dsh-workbuddy-auth managed provider` 旧块，把其 `workbuddy:` pair 更新成新的 canonical own node；并在 `plugin add` 前备份、移除 profile `cordis.patch.yml` 中精确的旧 `BEGIN/END dsh-workbuddy-auth managed block`，让 npm bundle patch 接管。BOM、CRLF、quoted top-level keys 以及其他合法 provider 会保留语义；无标记的 `workbuddy`、未知/畸形/重复/混合 marker 或无标记同 ID patch 行均会拒绝安装，不覆盖未知配置。plugin add 或后续 settings 阶段失败时会恢复旧 patch/settings。
 

@@ -24,6 +24,7 @@ test('npm manifest publishes a public DSH bundle with CLI and exact files allowl
     'lib/*.mjs',
     'lib/client.js',
     'cordis.patch.yml',
+    'CHANGELOG.md',
     'README.md',
     'LICENSE',
     'SECURITY.md',

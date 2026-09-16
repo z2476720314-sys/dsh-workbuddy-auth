@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbuddy-auth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
   "description": "把本机 WorkBuddy（CodeBuddy）登录态桥接为 DSH 凭据引用 WORKBUDDY_ACCESS_TOKEN",
   "main": "lib/index.mjs",
@@ -28,6 +28,7 @@
     "lib/*.mjs",
     "lib/client.js",
     "cordis.patch.yml",
+    "CHANGELOG.md",
     "README.md",
     "LICENSE",
     "SECURITY.md"
