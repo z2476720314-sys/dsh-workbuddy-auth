@@ -112,6 +112,34 @@ test('目标 host 只按解析后的 hostname 精确匹配，不受无关 URL �
   })
 })
 
+test('目标 host 不被后缀域名命中（copilot.tencent.com.evil 必须原样透传）', async () => {
+  const fake = makeFake()
+  const evil = `https://${HOST}.evil/v1/chat/completions`
+  const init = { headers: { 'user-agent': 'deepseek-harness/0.1.5-rc.1' } }
+
+  await withFix({ fetchImpl: fake }, async () => {
+    await globalThis.fetch(evil, init)
+
+    assert.equal(fake.calls.length, 1)
+    assert.equal(fake.calls[0].init, init, '子串匹配会把 copilot.tencent.com.evil 误判成目标上游')
+    assert.equal(new Headers(fake.calls[0].init.headers).get('user-agent'), 'deepseek-harness/0.1.5-rc.1')
+  })
+})
+
+test('目标 host 带端口/大小写时仍按 hostname 命中（端口的 hostname 相等）', async () => {
+  const fake = makeFake()
+
+  await withFix({ fetchImpl: fake }, async () => {
+    await globalThis.fetch(`https://${HOST}:443/v1/models`, { headers: {} })
+    await globalThis.fetch(`https://${HOST.toUpperCase()}/v1/models`, { headers: {} })
+
+    assert.equal(fake.calls.length, 2)
+    for (const call of fake.calls) {
+      assert.equal(new Headers(call.init.headers).get('user-agent'), UA)
+    }
+  })
+})
+
 test('disposer 复原原 fetch；复原后不再经过我们那层', async () => {
   const fake = makeFake()
   const saved = globalThis.fetch

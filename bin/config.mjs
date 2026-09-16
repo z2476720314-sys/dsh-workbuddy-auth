@@ -47,6 +47,9 @@ function providerValue(uid) {
     api: 'openai-completions',
     baseURL: 'https://copilot.tencent.com/v2',
     apiKeyEnv: 'WORKBUDDY_ACCESS_TOKEN',
+    // 静态 X-User-Id：仅作为包装层失效时的回退值。运行时 Host 插件会在
+    // globalThis.fetch 包装层里按当前激活账号动态覆盖该头（见 lib/user-agent.mjs 的 uidProvider），
+    // 因此切换账号后这里写入的旧 uid 不会真正发上游。
     headers: { 'X-User-Id': uid },
     compat: { supportsDeveloperRole: false },
     models: MODEL_CATALOG.map(([id, name, contextWindow, maxTokens, image]) => ({

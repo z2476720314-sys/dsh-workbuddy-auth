@@ -76,7 +76,10 @@ test('maskPhone / tail 的边界', () => {
 
 test('buildStatus 的字段白名单：多一个字段就可能多一处令牌泄漏面', () => {
   const s = buildStatus({ rawText: RAW, now: 1700000000000, userAgentFix: true, upstreamHost: 'copilot.tencent.com' })
-  assert.deepEqual(Object.keys(s).sort(), ['account', 'ok', 'state', 'token'])
+  // 多账号启用后 buildStatus 恒定带 accounts 字段（未启用时 enabled:false），
+  // 且它的内部结构同样被白名单钉住（见 status-multi-account.test.mjs）。
+  assert.deepEqual(Object.keys(s).sort(), ['account', 'accounts', 'ok', 'state', 'token'])
+  assert.deepEqual(Object.keys(s.accounts).sort(), ['activeId', 'enabled', 'sources'])
   assert.deepEqual(Object.keys(s.account).sort(), ['nickname', 'phoneMasked', 'uidTail'])
   assert.deepEqual(Object.keys(s.token).sort(), ['accessDaysLeft', 'accessExpiresAt', 'lastRefreshTime', 'refreshDaysLeft', 'refreshExpiresAt'])
   assert.deepEqual(Object.keys(s.state).sort(), ['credentialReadable', 'upstreamHost', 'userAgentFix'])

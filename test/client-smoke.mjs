@@ -241,7 +241,7 @@ test('requestStatus 使用同源 GET、白名单化 DTO，fetch 桩全程不联�
       headers: { 'Content-Type': 'application/json' },
     },
   }])
-  assert.deepEqual(Object.keys(result).sort(), ['account', 'credits', 'error', 'ok', 'state', 'token'])
+  assert.deepEqual(Object.keys(result).sort(), ['account', 'accounts', 'credits', 'error', 'ok', 'state', 'token'])
   assert.doesNotMatch(JSON.stringify(result), new RegExp(`${ACCESS_TOKEN}|${REFRESH_TOKEN}`))
 })
 

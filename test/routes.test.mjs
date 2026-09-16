@@ -22,7 +22,10 @@ const STATUS = '/api/dsh-workbuddy-auth/status'
 const CONNECTION_TEST = '/api/dsh-workbuddy-auth/connection/test'
 const CREDENTIAL_REFRESH = '/api/dsh-workbuddy-auth/credential/refresh'
 const CREDENTIAL_RELOAD = '/api/dsh-workbuddy-auth/credential/reload'
-const ALL_PATHS = [STATUS, CONNECTION_TEST, CREDENTIAL_REFRESH, CREDENTIAL_RELOAD]
+// 多账号路由恒定注册（未启用时返回 {ok:false,error:'multi-account disabled'} 降级）。
+const CREDENTIAL_SOURCES = '/api/dsh-workbuddy-auth/credentials/sources'
+const CREDENTIAL_ACTIVE = '/api/dsh-workbuddy-auth/credentials/active'
+const ALL_PATHS = [STATUS, CONNECTION_TEST, CREDENTIAL_REFRESH, CREDENTIAL_RELOAD, CREDENTIAL_SOURCES, CREDENTIAL_ACTIVE]
 
 /** 同源请求头：Origin 的 host 与 Host 头一致（端口也必须一致）。 */
 const SAME_ORIGIN = { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' }
@@ -125,15 +128,15 @@ function makeDeps(over = {}) {
   return { deps, calls }
 }
 
-test('注册 4 条 exact 路由：前缀正确、路径逐字一致，并返回可回收的 disposer', () => {
+test('注册 6 条 exact 路由：前缀正确、路径逐字一致，并返回可回收的 disposer', () => {
   const { ctx, routes } = makeCtx()
   const { deps } = makeDeps()
 
   const dispose = registerRoutes(ctx, deps)
 
-  assert.equal(routes.length, 4)
+  assert.equal(routes.length, ALL_PATHS.length)
   assert.deepEqual(routes.map((r) => r.path).sort(), [...ALL_PATHS].sort())
-  assert.ok(routes.every((r) => r.kind === 'exact'), '4 条都必须是 exact 路由')
+  assert.ok(routes.every((r) => r.kind === 'exact'), '全部都必须是 exact 路由')
   assert.ok(ALL_PATHS.every((p) => p.startsWith(`${ROUTE_PREFIX}/`)), '路径必须挂在约定的前缀下')
   assert.equal(ROUTE_PREFIX, '/api/dsh-workbuddy-auth')
   assert.deepEqual(ROUTE_PATHS, {
@@ -175,7 +178,7 @@ test('GET /status → 200，返回脱敏 DTO，响应体不含令牌值', async 
   })
   assert.equal(calls.readCredentialRaw, 1)
   assert.equal(calls.fetchCredits, 1)
-  assert.deepEqual(Object.keys(body).sort(), ['account', 'credits', 'ok', 'state', 'token'])
+  assert.deepEqual(Object.keys(body).sort(), ['account', 'accounts', 'credits', 'ok', 'state', 'token'])
   for (const forbidden of ['PackageCode', 'ResourceId', 'enterpriseId', 'accessToken', 'refreshToken', '00000000-1111-4222-8333-444444444444']) {
     assert.equal(String(res.state.raw).includes(forbidden), false, `/status 不得含敏感字段或原值 ${forbidden}`)
   }
@@ -555,7 +558,7 @@ test('真 Cordis 形态：服务经 ctx.get("webServer") 读取（未声明 inje
   const { deps, calls } = makeDeps()
   registerRoutes(ctx, deps)
 
-  assert.equal(routes.length, 4)
+  assert.equal(routes.length, ALL_PATHS.length)
   const res = await call(routes, CREDENTIAL_REFRESH, { method: 'POST' })
   assert.equal(res.state.status, 200)
   assert.equal(calls.refreshNow, 1)

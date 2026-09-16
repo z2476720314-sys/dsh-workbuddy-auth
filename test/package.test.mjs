@@ -11,7 +11,7 @@ const patch = await readFile(resolve(root, 'cordis.patch.yml'), 'utf8')
 test('npm manifest publishes a public DSH bundle with CLI and exact files allowlist', () => {
   assert.equal(manifest.private, undefined)
   assert.deepEqual(manifest.publishConfig, { access: 'public', registry: 'https://registry.npmjs.org' })
-  assert.deepEqual(manifest.bin, { 'dsh-workbuddy-auth': './bin/cli.mjs' })
+  assert.deepEqual(manifest.bin, { 'dsh-workbuddy-auth': 'bin/cli.mjs' })
   assert.equal(manifest.dsh.bundle.patch, './cordis.patch.yml')
   assert.deepEqual(manifest.repository, {
     type: 'git',

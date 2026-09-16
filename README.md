@@ -120,6 +120,7 @@ CLI 对底层 fs/Node/YAML 错误只输出封闭错误码对应的固定文案�
 - Host 凭据桥、临近过期自动续期与 CodeBuddy 凭据原子写回；
 - 只对 WorkBuddy 上游 hostname 生效的 User-Agent workaround；
 - Web 设置卡：脱敏账号状态、余额、连接测试、刷新和重新读取；
+- **多账号切换**：安装后设置卡会出现「切换账号」区，可随时在多个已登录的 WorkBuddy/CodeBuddy 账号间切换，推理与积分随之切换；`X-User-Id` 会跟随当前账号动态发送，无需手工改配置；
 - 浏览器响应不包含 token、refresh token、上游响应体或本地路径。
 
 本项目不提供聊天页脚的单次积分估算；余额仅采用 WorkBuddy 服务端返回的权威值。
