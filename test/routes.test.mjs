@@ -7,7 +7,7 @@
 //   * 所有响应 `content-type: application/json; charset=utf-8`；
 //   * **任何响应体都不得含 accessToken / refreshToken 的值**（含错误路径）；
 //   * 错误统一 `{ ok:false, error }`，只回显状态码/错误码，绝不整段回显上游响应体，
-//     也绝不回显本地文件路径（`ENOENT: … open 'C:\\Users\\…'` 会把用户目录带出去）。
+//     也绝不回显本地文件路径（`ENOENT: … open 'C:\\synthetic-root\\…'` 会把用户目录带出去）。
 // 所有令牌均为运行时合成的假串，不含任何真实机密。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -17,6 +17,7 @@ import { createRequire } from 'node:module'
 import { pathToFileURL } from 'node:url'
 import { registerRoutes, isCrossOrigin, isTrustedLoopbackHost, ROUTE_PREFIX, ROUTE_PATHS } from '../lib/routes.mjs'
 import { withCredits } from '../lib/status.mjs'
+import { sealedSeams } from './fixtures/sealed-seams.mjs'
 
 const STATUS = '/api/dsh-workbuddy-auth/status'
 const CONNECTION_TEST = '/api/dsh-workbuddy-auth/connection/test'
@@ -25,25 +26,42 @@ const CREDENTIAL_RELOAD = '/api/dsh-workbuddy-auth/credential/reload'
 // 多账号路由恒定注册（未启用时返回 {ok:false,error:'multi-account disabled'} 降级）。
 const CREDENTIAL_SOURCES = '/api/dsh-workbuddy-auth/credentials/sources'
 const CREDENTIAL_ACTIVE = '/api/dsh-workbuddy-auth/credentials/active'
-const ALL_PATHS = [STATUS, CONNECTION_TEST, CREDENTIAL_REFRESH, CREDENTIAL_RELOAD, CREDENTIAL_SOURCES, CREDENTIAL_ACTIVE]
+// 登录两条路由同样恒定注册，未启用多账号时降级。
+const LOGIN_START = '/api/dsh-workbuddy-auth/accounts/login'
+const LOGIN_STATUS = '/api/dsh-workbuddy-auth/accounts/login/status'
+// 签到两条路由：settings 带体（readsBody），now 为手动触发。
+const CHECKIN_SETTINGS = '/api/dsh-workbuddy-auth/checkin/settings'
+const CHECKIN_NOW = '/api/dsh-workbuddy-auth/checkin/now'
+const ALL_PATHS = [
+  STATUS,
+  CONNECTION_TEST,
+  CREDENTIAL_REFRESH,
+  CREDENTIAL_RELOAD,
+  CREDENTIAL_SOURCES,
+  CREDENTIAL_ACTIVE,
+  LOGIN_START,
+  LOGIN_STATUS,
+  CHECKIN_SETTINGS,
+  CHECKIN_NOW,
+]
 
 /** 同源请求头：Origin 的 host 与 Host 头一致（端口也必须一致）。 */
 const SAME_ORIGIN = { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' }
 
-const SECRET_A = 'SECRET-A'.repeat(20)
+const SEC_A = 'SECRET-A'.repeat(20)
 const SECRET_R = 'SECRET-R'.repeat(20)
 /** 生产 seam 用例用的合成令牌（同样不含任何真实机密）。 */
-const FAKE_TOKEN = 'SYNTHETIC-ACCESS'.repeat(8)
+const FAKTOK = 'SYNTHETIC-ACCESS'.repeat(8)
 const FAKE_REFRESH = 'SYNTHETIC-REFRESH'.repeat(8)
 const RAW = JSON.stringify({
   account: { uid: '00000000-1111-4222-8333-444444444444', nickname: '测试用户', phoneNumber: '13800001234' },
-  auth: { accessToken: SECRET_A, refreshToken: SECRET_R, expiresAt: 1702592000000, refreshExpiresAt: 1705184000000, lastRefreshTime: 1700000000000 },
+  auth: { accessToken: SEC_A, refreshToken: SECRET_R, expiresAt: 1702592000000, refreshExpiresAt: 1705184000000, lastRefreshTime: 1700000000000 },
 })
 
 /** 反向断言：响应文本里不得出现任何令牌值。 */
 function assertNoSecret(text, label) {
   const s = String(text)
-  for (const needle of ['SECRET-A', 'SECRET-R', SECRET_A, SECRET_R, FAKE_TOKEN, FAKE_REFRESH]) {
+  for (const needle of ['SECRET-A', 'SECRET-R', SEC_A, SECRET_R, FAKTOK, FAKE_REFRESH]) {
     assert.equal(s.includes(needle), false, `${label} 不得含令牌值（命中 ${needle.slice(0, 10)}…）`)
   }
 }
@@ -77,8 +95,21 @@ function makeCtx({ expose = 'property' } = {}) {
   return { ctx, webServer, routes: webServer.routes, infos }
 }
 
-function makeReq({ method = 'GET', headers = SAME_ORIGIN } = {}) {
-  return { method, headers }
+function makeReq({ method = 'GET', headers = SAME_ORIGIN, body } = {}) {
+  if (body === undefined) return { method, headers }
+  // 带体的请求：模拟真实流（data 先到、end 后到），供 readsBody 路由的 readJsonBody 使用。
+  const text = typeof body === 'string' ? body : JSON.stringify(body)
+  return {
+    method,
+    headers,
+    setEncoding() {},
+    on(event, handler) {
+      if (event === 'data') queueMicrotask(() => handler(text))
+      if (event === 'end') queueMicrotask(() => handler())
+      return this
+    },
+    resume() {},
+  }
 }
 
 /** 最小响应替身：记录状态码、响应头与响应体文本。 */
@@ -100,17 +131,29 @@ function makeRes() {
 }
 
 /** 找到路由并调用它，返回响应替身。 */
-async function call(routes, path, { method = 'GET', headers = SAME_ORIGIN } = {}) {
+async function call(routes, path, { method = 'GET', headers = SAME_ORIGIN, body } = {}) {
   const route = routes.find((r) => r.path === path)
   assert.ok(route !== undefined, `路由 ${path} 必须已注册`)
   const res = makeRes()
-  await route.handler(makeReq({ method, headers }), res)
+  await route.handler(makeReq({ method, headers, body }), res)
   return res
 }
 
 /** 假 deps：记录每个 seam 的调用次数，永不触网、永不碰盘。 */
 function makeDeps(over = {}) {
-  const calls = { readCredentialRaw: 0, fetchCredits: 0, testConnection: 0, refreshNow: 0, reloadSeam: 0 }
+  const calls = {
+    readCredentialRaw: 0,
+    fetchCredits: 0,
+    testConnection: 0,
+    refreshNow: 0,
+    reloadSeam: 0,
+    listCredentialSources: 0,
+    activateCredentialSource: 0,
+    startLogin: 0,
+    loginStatus: 0,
+    setCheckinEnabled: 0,
+    runCheckinNow: 0,
+  }
   const deps = {
     readCredentialRaw: async () => {
       calls.readCredentialRaw += 1
@@ -120,6 +163,30 @@ function makeDeps(over = {}) {
     testConnection: async () => { calls.testConnection += 1; return { status: 200, sseChunks: true, model: 'hy3' } },
     refreshNow: async () => { calls.refreshNow += 1; return { refreshed: true, throttled: false, expiresAt: 1702592000000 } },
     reloadSeam: async () => { calls.reloadSeam += 1; return { refreshed: false, throttled: false, expiresAt: 1702592000000 } },
+    listCredentialSources: async () => {
+      calls.listCredentialSources += 1
+      return { ok: true, activeId: 'desktop:one', sources: [{ id: 'desktop:one', label: { nickname: 'A', phoneMasked: '138****0000', uidTail: 'u-1' } }] }
+    },
+    activateCredentialSource: async (id) => {
+      calls.activateCredentialSource += 1
+      return { ok: true, activeId: id }
+    },
+    startLogin: async (region) => {
+      calls.startLogin += 1
+      return { ok: true, status: 'pending', region, progress: '等待浏览器授权…（0 秒）', authUrl: 'https://copilot.tencent.com/auth?x=1' }
+    },
+    loginStatus: () => {
+      calls.loginStatus += 1
+      return { ok: true, status: 'idle', progress: '未开始' }
+    },
+    setCheckinEnabled: async (enabled) => {
+      calls.setCheckinEnabled += 1
+      return { enabled, totalAccounts: 2, doneToday: 1, skippedToday: 1, failedToday: 0, lastRunAt: 1700000000000 }
+    },
+    runCheckinNow: async () => {
+      calls.runCheckinNow += 1
+      return { enabled: true, totalAccounts: 2, doneToday: 2, skippedToday: 0, failedToday: 0, lastRunAt: 1700000000001 }
+    },
     now: () => 1700000000000,
     upstreamHost: 'copilot.tencent.com',
     userAgentFix: true,
@@ -128,7 +195,22 @@ function makeDeps(over = {}) {
   return { deps, calls }
 }
 
-test('注册 6 条 exact 路由：前缀正确、路径逐字一致，并返回可回收的 disposer', () => {
+/** 全部 seam 都为零调用的期望值（签到路由启用后 count 从 9 涨到 11）。 */
+const NO_CALLS = {
+  readCredentialRaw: 0,
+  fetchCredits: 0,
+  testConnection: 0,
+  refreshNow: 0,
+  reloadSeam: 0,
+  listCredentialSources: 0,
+  activateCredentialSource: 0,
+  startLogin: 0,
+  loginStatus: 0,
+  setCheckinEnabled: 0,
+  runCheckinNow: 0,
+}
+
+test('注册 10 条 exact 路由：前缀正确、路径逐字一致，并返回可回收的 disposer', () => {
   const { ctx, routes } = makeCtx()
   const { deps } = makeDeps()
 
@@ -144,6 +226,12 @@ test('注册 6 条 exact 路由：前缀正确、路径逐字一致，并返回�
     connectionTest: CONNECTION_TEST,
     credentialRefresh: CREDENTIAL_REFRESH,
     credentialReload: CREDENTIAL_RELOAD,
+    credentialSources: CREDENTIAL_SOURCES,
+    credentialActive: CREDENTIAL_ACTIVE,
+    login: LOGIN_START,
+    loginStatus: LOGIN_STATUS,
+    checkinSettings: CHECKIN_SETTINGS,
+    checkinNow: CHECKIN_NOW,
   })
 
   assert.equal(typeof dispose, 'function')
@@ -178,7 +266,7 @@ test('GET /status → 200，返回脱敏 DTO，响应体不含令牌值', async 
   })
   assert.equal(calls.readCredentialRaw, 1)
   assert.equal(calls.fetchCredits, 1)
-  assert.deepEqual(Object.keys(body).sort(), ['account', 'accounts', 'credits', 'ok', 'state', 'token'])
+  assert.deepEqual(Object.keys(body).sort(), ['account', 'accounts', 'checkin', 'credits', 'ok', 'state', 'token'])
   for (const forbidden of ['PackageCode', 'ResourceId', 'enterpriseId', 'accessToken', 'refreshToken', '00000000-1111-4222-8333-444444444444']) {
     assert.equal(String(res.state.raw).includes(forbidden), false, `/status 不得含敏感字段或原值 ${forbidden}`)
   }
@@ -221,7 +309,7 @@ test('GET /status：即使脏余额 seam 返回包、账号与 token，响应也
       ResourceId: 'SECRET-RESOURCE',
       uid: 'SECRET-UID',
       enterpriseId: 'SECRET-ENTERPRISE',
-      accessToken: SECRET_A,
+      accessToken: SEC_A,
       refreshToken: SECRET_R,
     }),
   })
@@ -259,7 +347,7 @@ test('GET /status 在凭据不可读时仍返回 200 + ok:false（状态查询�
 test('M4：GET /status 的错误不得回显本地文件路径（只回错误码）', async () => {
   const { ctx, routes } = makeCtx()
   // 真实形态：Node 的 ENOENT 消息里带绝对路径，直接回显等于把用户目录（乃至用户名）交给浏览器。
-  const localPath = 'C:\\Users\\somebody\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\Tencent-Cloud.coding-copilot.info'
+  const localPath = 'C:\\synthetic-root\\somebody\\AppData\\Local\\CodeBuddyExtension\\Data\\Public\\auth\\Tencent-Cloud.coding-copilot.info'
   const boom = new Error(`ENOENT: no such file or directory, open '${localPath}'`)
   boom.code = 'ENOENT'
   const { deps } = makeDeps({ readCredentialRaw: async () => { throw boom } })
@@ -278,7 +366,7 @@ test('M4：GET /status 的错误不得回显本地文件路径（只回错误码
 
 test('M4：GET /status 的未知错误压缩成固定消息，绝不回显原文', async () => {
   const { ctx, routes } = makeCtx()
-  const boom = new Error(`unexpected failure reading C:\\Users\\somebody\\secret\\path.info (body: ${SECRET_A})`)
+  const boom = new Error(`unexpected failure reading C:\\synthetic-root\\somebody\\secret\\path.info (body: ${SEC_A})`)
   const { deps } = makeDeps({ readCredentialRaw: async () => { throw boom } })
   registerRoutes(ctx, deps)
 
@@ -328,7 +416,7 @@ test('GET /status：三种 loopback Host 在同源或无 Origin 时放行', asyn
   assert.equal(calls.readCredentialRaw, 4)
 })
 
-test('所有 4 条路由拒绝非 loopback Host，即使 Origin 与 Host 相同，且 deps 零调用', async () => {
+test('所有路由拒绝非 loopback Host，即使 Origin 与 Host 相同，且 deps 零调用', async () => {
   const { ctx, routes } = makeCtx()
   const { deps, calls } = makeDeps()
   registerRoutes(ctx, deps)
@@ -338,6 +426,12 @@ test('所有 4 条路由拒绝非 loopback Host，即使 Origin 与 Host 相同�
     [CONNECTION_TEST, 'POST'],
     [CREDENTIAL_REFRESH, 'POST'],
     [CREDENTIAL_RELOAD, 'POST'],
+    [CREDENTIAL_SOURCES, 'GET'],
+    [CREDENTIAL_ACTIVE, 'POST'],
+    [LOGIN_START, 'POST'],
+    [LOGIN_STATUS, 'GET'],
+    [CHECKIN_SETTINGS, 'POST'],
+    [CHECKIN_NOW, 'POST'],
   ]) {
     const res = await call(routes, path, {
       method,
@@ -346,10 +440,10 @@ test('所有 4 条路由拒绝非 loopback Host，即使 Origin 与 Host 相同�
     assert.equal(res.state.status, 403, `${path} 不得接受 DNS rebinding Host`)
     assert.equal(res.jsonBody().ok, false)
   }
-  assert.deepEqual(calls, { readCredentialRaw: 0, fetchCredits: 0, testConnection: 0, refreshNow: 0, reloadSeam: 0 })
+  assert.deepEqual(calls, NO_CALLS)
 })
 
-test('所有 4 条路由在 Host 缺失时一律 403（包括无 Origin），且 deps 零调用', async () => {
+test('所有路由在 Host 缺失时一律 403（包括无 Origin），且 deps 零调用', async () => {
   const { ctx, routes } = makeCtx()
   const { deps, calls } = makeDeps()
   registerRoutes(ctx, deps)
@@ -359,6 +453,12 @@ test('所有 4 条路由在 Host 缺失时一律 403（包括无 Origin），且
     [CONNECTION_TEST, 'POST'],
     [CREDENTIAL_REFRESH, 'POST'],
     [CREDENTIAL_RELOAD, 'POST'],
+    [CREDENTIAL_SOURCES, 'GET'],
+    [CREDENTIAL_ACTIVE, 'POST'],
+    [LOGIN_START, 'POST'],
+    [LOGIN_STATUS, 'GET'],
+    [CHECKIN_SETTINGS, 'POST'],
+    [CHECKIN_NOW, 'POST'],
   ]) {
     for (const headers of [{}, { origin: 'http://127.0.0.1:3080' }]) {
       const res = await call(routes, path, { method, headers })
@@ -366,7 +466,7 @@ test('所有 4 条路由在 Host 缺失时一律 403（包括无 Origin），且
       assert.equal(res.jsonBody().ok, false)
     }
   }
-  assert.deepEqual(calls, { readCredentialRaw: 0, fetchCredits: 0, testConnection: 0, refreshNow: 0, reloadSeam: 0 })
+  assert.deepEqual(calls, NO_CALLS)
 })
 
 test('POST /connection/test 同源 → 200，deps.testConnection 恰好一次', async () => {
@@ -407,7 +507,7 @@ test('所有会改状态的路由都对跨源 Origin 返回 403（端口不同�
   const { deps, calls } = makeDeps()
   registerRoutes(ctx, deps)
 
-  for (const path of [CONNECTION_TEST, CREDENTIAL_REFRESH, CREDENTIAL_RELOAD]) {
+  for (const path of [CONNECTION_TEST, CREDENTIAL_REFRESH, CREDENTIAL_RELOAD, CREDENTIAL_ACTIVE, LOGIN_START, CHECKIN_SETTINGS, CHECKIN_NOW]) {
     const res = await call(routes, path, {
       method: 'POST',
       headers: { origin: 'http://127.0.0.1:9999', host: '127.0.0.1:3080' },
@@ -415,7 +515,7 @@ test('所有会改状态的路由都对跨源 Origin 返回 403（端口不同�
     assert.equal(res.state.status, 403, `${path} 跨源必须 403`)
     assertNoSecret(res.state.raw, `${path}（跨源）`)
   }
-  assert.deepEqual(calls, { readCredentialRaw: 0, fetchCredits: 0, testConnection: 0, refreshNow: 0, reloadSeam: 0 })
+  assert.deepEqual(calls, NO_CALLS)
 
   // missing / 非法 Origin 头同样算跨源，绝不能放行。
   const forged = await call(routes, CREDENTIAL_REFRESH, { method: 'POST', headers: { origin: 'not-a-url', host: '127.0.0.1:3080' } })
@@ -462,14 +562,22 @@ test('POST 路由拒绝非 POST：405 + allow 头，且零依赖调用', async (
   const { deps, calls } = makeDeps()
   registerRoutes(ctx, deps)
 
-  for (const path of [CONNECTION_TEST, CREDENTIAL_REFRESH, CREDENTIAL_RELOAD]) {
+  for (const path of [CONNECTION_TEST, CREDENTIAL_REFRESH, CREDENTIAL_RELOAD, CREDENTIAL_ACTIVE, LOGIN_START, CHECKIN_SETTINGS, CHECKIN_NOW]) {
     const res = await call(routes, path, { method: 'GET' })
     assert.equal(res.state.status, 405, `${path} 必须只接受 POST`)
     assert.equal(res.state.headers.allow, 'POST')
     assert.equal(res.state.headers['content-type'], 'application/json; charset=utf-8')
     assert.equal(res.jsonBody().ok, false)
   }
-  assert.deepEqual(calls, { readCredentialRaw: 0, fetchCredits: 0, testConnection: 0, refreshNow: 0, reloadSeam: 0 })
+  assert.deepEqual(calls, NO_CALLS)
+
+  // GET 路由拒绝 POST。
+  for (const path of [STATUS, CREDENTIAL_SOURCES, LOGIN_STATUS]) {
+    const res = await call(routes, path, { method: 'POST' })
+    assert.equal(res.state.status, 405, `${path} 必须只接受 GET`)
+    assert.equal(res.state.headers.allow, 'GET')
+  }
+  assert.deepEqual(calls, NO_CALLS)
 })
 
 test('依赖抛错 → 500 { ok:false, error }，只回显状态码，不回显上游原始响应体', async () => {
@@ -490,7 +598,7 @@ test('依赖抛错 → 500 { ok:false, error }，只回显状态码，不回显�
 
 test('错误路径绝不整段回显上游响应体（响应体里可能夹带令牌）', async () => {
   const { ctx, routes } = makeCtx()
-  const upstreamBody = `{"code":12153,"msg":"request illegal","accessToken":"${SECRET_A}"}`
+  const upstreamBody = `{"code":12153,"msg":"request illegal","accessToken":"${SEC_A}"}`
   const { deps } = makeDeps({
     testConnection: async () => { throw new Error(`upstream rejected the probe: ${upstreamBody}`) },
   })
@@ -521,10 +629,19 @@ test('错误路径回显错误码（如 ENOENT）而不是吞掉原因', async (
 test('动作类路由的响应体是固定白名单字段：多一个字段就多一处令牌泄漏面', async () => {
   const { ctx, routes } = makeCtx()
   // 故意让假 deps 返回带令牌的「脏」结果：路由层必须只取白名单字段，不得 spread。
+  const dirtyConnection = {
+    status: 200,
+    sseChunks: true,
+    model: 'hy3',
+    accessToken: SEC_A,
+  }
+  const dirtyRecord = {
+    accessToken: SEC_A,
+  }
   const { deps } = makeDeps({
-    testConnection: async () => ({ status: 200, sseChunks: true, model: 'hy3', accessToken: SECRET_A }),
-    refreshNow: async () => ({ refreshed: true, throttled: false, expiresAt: 42, accessToken: SECRET_A, record: { accessToken: SECRET_A } }),
-    reloadSeam: async () => ({ refreshed: false, throttled: false, expiresAt: 42, token: SECRET_A }),
+    testConnection: async () => dirtyConnection,
+    refreshNow: async () => ({ refreshed: true, throttled: false, expiresAt: 42, accessToken: SEC_A, record: dirtyRecord }),
+    reloadSeam: async () => ({ refreshed: false, throttled: false, expiresAt: 42, token: SEC_A }),
   })
   registerRoutes(ctx, deps)
 
@@ -537,6 +654,190 @@ test('动作类路由的响应体是固定白名单字段：多一个字段就�
     assert.deepEqual(Object.keys(res.jsonBody()).sort(), ['expiresAt', 'ok', 'refreshed', 'throttled'])
     assertNoSecret(res.state.raw, `${path}（脏 deps）`)
   }
+})
+
+test('POST /accounts/login 同源 → 200：region 透传、依赖恰一次、响应体只含白名单字段', async () => {
+  const { ctx, routes } = makeCtx()
+  const regions = []
+  const { deps, calls } = makeDeps({
+    startLogin: async (region) => {
+      calls.startLogin += 1
+      regions.push(region)
+      return {
+        status: 'pending',
+        region,
+        authUrl: 'https://copilot.tencent.com/auth?x=1',
+        progress: '等待浏览器授权…（0 秒）',
+        startedAt: 1700000000000,
+        // 脏字段：服务若把它带出来就会泄漏，白名单必须挡住。
+        accessToken: SEC_A,
+        refreshToken: SECRET_R,
+      }
+    },
+  })
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, LOGIN_START, { method: 'POST', body: { region: ' CN ' } })
+
+  assert.equal(res.state.status, 200)
+  const body = res.jsonBody()
+  assert.equal(body.ok, true)
+  assert.equal(body.status, 'pending')
+  assert.equal(body.region, 'cn', '地区必须先归一化再交给服务')
+  assert.deepEqual(regions, ['cn'])
+  assert.deepEqual(Object.keys(body).sort(), ['authUrl', 'ok', 'progress', 'region', 'startedAt', 'status'])
+  assertNoSecret(res.state.raw, 'POST /accounts/login')
+})
+
+test('POST /accounts/login：坏 JSON / 缺 region 都不抛错，交给服务做 fail-closed 校验', async () => {
+  const { ctx, routes } = makeCtx()
+  const regions = []
+  const { deps } = makeDeps({
+    startLogin: async (region) => {
+      regions.push(region)
+      if (region !== 'cn' && region !== 'intl') {
+        const error = new Error('region is not supported')
+        error.code = 'WORKBUDDY_LOGIN_REGION'
+        throw error
+      }
+      return { status: 'pending', region }
+    },
+  })
+  registerRoutes(ctx, deps)
+
+  const bad = await call(routes, LOGIN_START, { method: 'POST', body: 'not json at all' })
+  assert.equal(bad.state.status, 500)
+  assert.deepEqual(bad.jsonBody(), { ok: false, error: 'WORKBUDDY_LOGIN_REGION' })
+  assertNoSecret(bad.state.raw, 'POST /accounts/login（坏 JSON）')
+
+  const missing = await call(routes, LOGIN_START, { method: 'POST', body: {} })
+  assert.equal(missing.state.status, 500)
+  assert.deepEqual(regions, ['', ''], '空地区交给服务判定，路由不自作聪明放行')
+})
+
+test('GET /accounts/login/status 同源 → 200：只读本地状态、依赖恰一次、idle 也返回 DTO', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps, calls } = makeDeps()
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, LOGIN_STATUS)
+
+  assert.equal(res.state.status, 200)
+  assert.equal(res.state.headers['cache-control'], 'no-store')
+  assert.deepEqual(res.jsonBody(), { ok: true, status: 'idle', progress: '未开始' })
+  assert.equal(calls.loginStatus, 1)
+  assert.equal(calls.startLogin, 0, '状态查询绝不得顺带发起登录')
+  assertNoSecret(res.state.raw, 'GET /accounts/login/status')
+})
+
+test('登录操作失败 → ok:false + 错误码（含 error 状态），不泄漏原文与本地路径', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps } = makeDeps({
+    startLogin: async () => ({
+      status: 'error',
+      region: 'cn',
+      error: 'WORKBUDDY_LOGIN_TIMEOUT',
+      progress: '授权超时，请重新发起登录',
+      accessToken: SEC_A,
+      detail: 'ENOENT: no such file or directory, open \'C:\\synthetic-root\\secret\\tokens.json\'',
+    }),
+  })
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, LOGIN_START, { method: 'POST', body: { region: 'cn' } })
+
+  assert.equal(res.state.status, 200, '登录失败不是 HTTP 错误：客户端要能读到状态机')
+  const body = res.jsonBody()
+  assert.equal(body.ok, false)
+  assert.equal(body.status, 'error')
+  assert.equal(body.error, 'WORKBUDDY_LOGIN_TIMEOUT')
+  assert.equal(body.status, 'error')
+  assert.equal(Object.keys(body).includes('detail'), false, '未知字段一律丢弃')
+  assertNoSecret(res.state.raw, 'POST /accounts/login（失败态）')
+  assert.equal(JSON.stringify(body).includes('C:\\Users'), false, '不得回显本地路径')
+})
+
+test('登录路由：非 https 授权链接被投影丢弃（协议混淆挡在路由层）', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps } = makeDeps({
+    loginStatus: () => ({ status: 'pending', region: 'cn', authUrl: 'javascript:alert(1)', progress: '等待浏览器授权…（1 秒）' }),
+  })
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, LOGIN_STATUS)
+
+  assert.equal(res.state.status, 200)
+  assert.equal(Object.keys(res.jsonBody()).includes('authUrl'), false)
+})
+
+test('登录路由：https 但不在该地区受信域白名单内的授权链接一律丢弃', async () => {
+  const { ctx, routes } = makeCtx()
+  const cases = [
+    { region: 'cn', authUrl: 'https://evil.example.com/authorize?token=x' },
+    { region: 'cn', authUrl: 'https://www.workbuddy.ai/authorize?token=x' }, // 地区不一致同样拒绝
+    { region: 'intl', authUrl: 'https://copilot.tencent.com/authorize?token=x' },
+    { region: 'intl', authUrl: 'https://www.workbuddy.ai.evil.example.com/authorize' }, // 后缀伪装
+    { region: undefined, authUrl: 'https://copilot.tencent.com/authorize' }, // 地区未知 → 不猜
+  ]
+  const seen = []
+  const { deps } = makeDeps({
+    loginStatus: () => {
+      const item = cases[seen.length] ?? cases[0]
+      seen.push(item)
+      return { status: 'pending', region: item.region, authUrl: item.authUrl, progress: '等待浏览器授权…（1 秒）' }
+    },
+  })
+  registerRoutes(ctx, deps)
+
+  for (let i = 0; i < cases.length; i += 1) {
+    const res = await call(routes, LOGIN_STATUS)
+    assert.equal(res.state.status, 200)
+    assert.equal(Object.keys(res.jsonBody()).includes('authUrl'), false, `授权链接必须被丢弃：${cases[i].authUrl}`)
+  }
+  assert.equal(seen.length, cases.length, '每个用例都必须真的被服务返回过')
+})
+
+test('登录路由：受信域授权链接放行，账号 sourceId 必须是 managed: 形状', async () => {
+  const { ctx, routes } = makeCtx()
+  const payload = {
+    status: 'complete',
+    region: 'intl',
+    authUrl: 'https://login.workbuddy.ai/authorize?state=s1',
+    progress: '授权完成',
+    account: { id: '3f1b', sourceId: 'managed:3f1b', region: 'intl', nickname: '丙', phoneMasked: '138****0003', uidTail: '0003' },
+  }
+  const { deps } = makeDeps({ loginStatus: () => payload })
+  registerRoutes(ctx, deps)
+
+  const ok = await call(routes, LOGIN_STATUS)
+  const okBody = ok.jsonBody()
+  assert.equal(okBody.authUrl, 'https://login.workbuddy.ai/authorize?state=s1')
+  assert.equal(okBody.account.sourceId, 'managed:3f1b')
+  assert.deepEqual(Object.keys(okBody.account).sort(), ['id', 'nickname', 'phoneMasked', 'region', 'sourceId', 'uidTail'])
+
+  // 脏 sourceId（非 managed: 形状 / 超长 / 非字符串）必须被丢弃，不得原样回显。
+  for (const dirty of ['javascript:alert(1)', '3f1b', 'managed:' + 'a'.repeat(80), 42, 'managed:../etc']) {
+    const { ctx: ctx2, routes: routes2 } = makeCtx()
+    const { deps: deps2 } = makeDeps({ loginStatus: () => ({ ...payload, account: { ...payload.account, sourceId: dirty } }) })
+    registerRoutes(ctx2, deps2)
+    const res = await call(routes2, LOGIN_STATUS)
+    const body = res.jsonBody()
+    assert.equal(Object.keys(body.account).includes('sourceId'), false, `脏 sourceId 必须被丢弃：${String(dirty)}`)
+  }
+})
+
+test('登录路由未启用多账号时降级：200 + { ok:false, error:"multi-account disabled" }', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps } = makeDeps({ startLogin: undefined, loginStatus: undefined })
+  registerRoutes(ctx, deps)
+
+  const start = await call(routes, LOGIN_START, { method: 'POST', body: { region: 'cn' } })
+  assert.equal(start.state.status, 200)
+  assert.deepEqual(start.jsonBody(), { ok: false, error: 'multi-account disabled' })
+
+  const status = await call(routes, LOGIN_STATUS)
+  assert.equal(status.state.status, 200)
+  assert.deepEqual(status.jsonBody(), { ok: false, error: 'multi-account disabled' })
 })
 
 test('webServer 缺失（非 web 组合）时降级：不抛错、返回 no-op disposer、留一行日志', () => {
@@ -645,7 +946,7 @@ test('apply：webServer 提供方晚于 apply 就绪时，路由最终仍被注�
 
   globalThis.fetch = fake
   try {
-    apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-late-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 })
+    apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-late-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 }, sealedSeams())
 
     assert.deepEqual(routes, [], '依赖未就绪时不得注册任何路由（这正是旧实现的失败点）')
     assert.equal(pendingCallbacks.length, 1, 'apply 必须把路由注册登记为对 webServer 的声明式依赖')
@@ -663,7 +964,7 @@ test('apply：webServer 提供方晚于 apply 就绪时，路由最终仍被注�
   }
 })
 
-test('apply：webServer 就绪时立即注册 4 条路由，卸载时全部回收', async () => {
+test('apply：webServer 就绪时立即注册全部 exact 路由，卸载时全部回收', async () => {
   const { apply } = await import('../lib/index.mjs')
   const realFetch = globalThis.fetch
   const fake = async () => ({ ok: true, status: 200, text: async () => '{}' })
@@ -671,9 +972,9 @@ test('apply：webServer 就绪时立即注册 4 条路由，卸载时全部回�
 
   globalThis.fetch = fake
   try {
-    apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-routes-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 })
+    apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-routes-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 }, sealedSeams())
 
-    assert.equal(disposers.length, 3, 'UA 修复 + 凭据同步 + 设置路由，三者都必须可回收')
+    assert.equal(disposers.length, 4, 'UA 修复 + 凭据同步 + 自动签到 + 设置路由，四者都必须可回收')
     assert.deepEqual(routes.map((r) => r.path).sort(), [...ALL_PATHS].sort())
 
     for (const d of disposers) d()
@@ -693,10 +994,10 @@ test('apply：非 web 组合里 webServer 永不到来时，不注册路由、�
 
   globalThis.fetch = fake
   try {
-    assert.doesNotThrow(() => apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-noweb-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 }))
+    assert.doesNotThrow(() => apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-noweb-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 }, sealedSeams()))
 
     assert.deepEqual(routes, [], '没有 webServer 就不该注册任何路由')
-    assert.equal(disposers.length, 2, '降级路径不得新增 effect：UA 修复 + 凭据同步仍必须照常挂上')
+    assert.equal(disposers.length, 3, '降级路径不得新增 effect：UA 修复 + 凭据同步 + 自动签到仍必须照常挂上')
     assert.equal(pendingCallbacks.length, 1, '依赖声明本身仍然登记（Cordis 里表现为 fiber 保持 PENDING，apply 其余部分不受影响）')
   } finally {
     for (const d of disposers) d?.()
@@ -820,15 +1121,16 @@ test('M6：强制刷新的最小间隔与 tick 路径同一默认来源（config
   const MIN_INTERVAL = CUSTOM_MARGIN / 2
   await writeFile(file, JSON.stringify({
     account: { uid: 'u1' },
-    auth: { accessToken: FAKE_TOKEN, refreshToken: FAKE_REFRESH, expiresAt: T0 + 1000 },
+    auth: { accessToken: FAKTOK, refreshToken: FAKE_REFRESH, expiresAt: T0 + 1000 },
   }), 'utf8')
 
   const ctx = { credentials: { set: async () => {} } }
+  const nxtTok = `NEXT-${FAKTOK}`
   const fetchImpl = makeSpyFetch(async () => ({
     ok: true,
     status: 200,
     // 响应不带 expiresAt：合并后沿用旧值（仍在阈值内），节流因此是唯一边界。
-    text: async () => JSON.stringify({ data: { accessToken: `NEXT-${FAKE_TOKEN}`, refreshToken: `NEXT-${FAKE_REFRESH}` } }),
+    text: async () => JSON.stringify({ data: { accessToken: nxtTok, refreshToken: `NEXT-${FAKE_REFRESH}` } }),
   }))
   const config = { credentialFile: file, refreshMarginMs: CUSTOM_MARGIN }
   const syncDeps = createSyncDeps(ctx, config, fetchImpl)
@@ -857,7 +1159,7 @@ test('M6：强制刷新的最小间隔与 tick 路径同一默认来源（config
   assert.equal(fetchImpl.calls.length, 2)
 
   const onDisk = JSON.parse(await readFile(file, 'utf8'))
-  assert.equal(onDisk.auth.accessToken, `NEXT-${FAKE_TOKEN}`, '刷新结果必须写回原凭据文件')
+  assert.equal(onDisk.auth.accessToken, `NEXT-${FAKTOK}`, '刷新结果必须写回原凭据文件')
 })
 
 //
@@ -873,7 +1175,7 @@ async function writeTempCredential({ expiresAt = Date.now() + 90 * 864e5 } = {})
   const file = join(dir, 'Tencent-Cloud.coding-copilot.info')
   await writeFile(file, JSON.stringify({
     account: { uid: '00000000-1111-4222-8333-444444444444', nickname: '测试用户', phoneNumber: '13800001234' },
-    auth: { accessToken: FAKE_TOKEN, refreshToken: FAKE_REFRESH, expiresAt, refreshExpiresAt: expiresAt + 30 * 864e5, lastRefreshTime: 1 },
+    auth: { accessToken: FAKTOK, refreshToken: FAKE_REFRESH, expiresAt, refreshExpiresAt: expiresAt + 30 * 864e5, lastRefreshTime: 1 },
   }), 'utf8')
   return file
 }
@@ -918,7 +1220,7 @@ test('createRouteDeps：GET /status 只走固定余额 endpoint，并输出安�
   assert.equal(fetchImpl.calls.length, 1)
   assert.deepEqual(status.credits, { ok: true, remaining: 12.5, total: 20, used: 7.25, fetchedAt: status.credits.fetchedAt, stale: false })
   const text = JSON.stringify(status)
-  for (const forbidden of ['SECRET-PACKAGE', 'SECRET-RESOURCE', FAKE_TOKEN, FAKE_REFRESH, '00000000-1111-4222-8333-444444444444']) {
+  for (const forbidden of ['SECRET-PACKAGE', 'SECRET-RESOURCE', FAKTOK, FAKE_REFRESH, '00000000-1111-4222-8333-444444444444']) {
     assert.equal(text.includes(forbidden), false)
   }
 })
@@ -935,7 +1237,7 @@ test('createRouteDeps：测试连接只回结构性事实，绝不回响应体�
   assert.equal(fetchImpl.calls.length, 1, '一次极小请求，不循环、不压测')
   assert.equal(fetchImpl.calls[0].url, 'https://copilot.tencent.com/v2/chat/completions')
   const sent = fetchImpl.calls[0].init
-  assert.equal(sent.headers.Authorization, `Bearer ${FAKE_TOKEN}`, '出站请求必须带上凭据（这是它存在的意义）')
+  assert.equal(sent.headers.Authorization, `Bearer ${FAKTOK}`, '出站请求必须带上凭据（这是它存在的意义）')
   assert.equal(sent.headers['User-Agent'], 'dsh-workbuddy/0.1', '必须带已验证为 200 的 UA，绕开网关按 UA 的拦截')
   assert.equal(sent.headers['X-User-Id'], '00000000-1111-4222-8333-444444444444')
   assert.equal(JSON.parse(sent.body).max_tokens, 16)
@@ -954,7 +1256,7 @@ test('createRouteDeps：非可用流 / 网络失败都只回结构性事实（�
   assert.deepEqual(await plain.testConnection(), { status: 200, sseChunks: false, model: 'hy3' })
 
   const breaking = makeSpyFetch(async () => {
-    const cause = new Error(`connect ECONNREFUSED (raw body would go here: ${FAKE_TOKEN})`)
+    const cause = new Error(`connect ECONNREFUSED (raw body would go here: ${FAKTOK})`)
     cause.code = 'ECONNREFUSED'
     throw cause
   })
@@ -972,10 +1274,11 @@ test('createRouteDeps：强制刷新走完整受保护管线，返回值不含�
   const { readFile } = await import('node:fs/promises')
   // 到期时间很远：needsRefresh 本会返回 false，「强制」刷新必须仍然刷新。
   const file = await writeTempCredential({ expiresAt: Date.now() + 300 * 864e5 })
+  const nxtTok = `NEXT-${FAKTOK}`
   const fetchImpl = makeSpyFetch(async () => ({
     ok: true,
     status: 200,
-    text: async () => JSON.stringify({ data: { accessToken: `NEXT-${FAKE_TOKEN}`, refreshToken: `NEXT-${FAKE_REFRESH}`, expiresIn: 3600 } }),
+    text: async () => JSON.stringify({ data: { accessToken: nxtTok, refreshToken: `NEXT-${FAKE_REFRESH}`, expiresIn: 3600 } }),
   }))
   const deps = createRouteDeps({ credentials: { set: async () => {} } }, { credentialFile: file }, fetchImpl)
 
@@ -989,7 +1292,7 @@ test('createRouteDeps：强制刷新走完整受保护管线，返回值不含�
   assertNoSecret(JSON.stringify(result), 'refreshNow 的返回值')
 
   const onDisk = JSON.parse(await readFile(file, 'utf8'))
-  assert.equal(onDisk.auth.accessToken, `NEXT-${FAKE_TOKEN}`, '刷新结果必须原子写回原凭据文件')
+  assert.equal(onDisk.auth.accessToken, `NEXT-${FAKTOK}`, '刷新结果必须原子写回原凭据文件')
   assert.equal(onDisk.account.nickname, '测试用户', '写回不得丢掉未涉及的字段')
 })
 
@@ -1017,7 +1320,7 @@ test('createRouteDeps：并发重新读取与其他同步共用 guard，busy 固
   const { createRouteDeps } = await import('../lib/index.mjs')
   const soon = JSON.stringify({
     account: { uid: 'u1' },
-    auth: { accessToken: FAKE_TOKEN, refreshToken: FAKE_REFRESH, expiresAt: Date.now() + 90 * 864e5 },
+    auth: { accessToken: FAKTOK, refreshToken: FAKE_REFRESH, expiresAt: Date.now() + 90 * 864e5 },
   })
   let release
   const blocked = new Promise((resolve) => { release = resolve })
@@ -1066,7 +1369,7 @@ test('createRouteDeps：重新读取会同步到凭据 seam，返回值不含令
   assert.deepEqual(Object.keys(result).sort(), ['expiresAt', 'refreshed', 'throttled'])
   assert.equal(result.refreshed, false)
   assert.equal(fetchImpl.calls.length, 0)
-  assert.deepEqual(sets, [['WORKBUDDY_ACCESS_TOKEN', FAKE_TOKEN]], '重新读取必须把当前令牌写进 seam')
+  assert.deepEqual(sets, [['WORKBUDDY_ACCESS_TOKEN', FAKTOK]], '重新读取必须把当前令牌写进 seam')
   assertNoSecret(JSON.stringify(result), 'reloadSeam 的返回值')
 })
 
@@ -1086,4 +1389,105 @@ test('isUserAgentFixInstalled 如实反映当下状态，而不是无条件声�
   } finally {
     globalThis.fetch = realFetch
   }
+})
+
+// —— 签到两条路由：settings 带体（严格布尔）、now 手动触发 ——
+//
+// 语义约定：两条都返回**白名单投影**后的签到摘要（enabled/计数/lastRunAt），
+// 非法 settings 一律 400 固定错误码（不是 500：这是客户端输入问题，不是服务故障）。
+
+test('POST /checkin/settings 同源 → 200，seam 收到布尔值，响应体只含白名单摘要', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps, calls } = makeDeps()
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, CHECKIN_SETTINGS, { method: 'POST', body: { enabled: false } })
+
+  assert.equal(res.state.status, 200)
+  assert.equal(calls.setCheckinEnabled, 1)
+  const body = res.jsonBody()
+  assert.deepEqual(body, { ok: true, checkin: { enabled: false, totalAccounts: 2, doneToday: 1, skippedToday: 1, failedToday: 0, lastRunAt: 1700000000000 } })
+  assertNoSecret(res.state.raw, 'POST /checkin/settings')
+})
+
+test('POST /checkin/settings 非法 body → 400 固定错误码，且零 seam 调用', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps, calls } = makeDeps()
+  registerRoutes(ctx, deps)
+
+  for (const body of [{}, { enabled: 'yes' }, { enabled: 1 }, { enabled: null }, 'not-json', undefined]) {
+    const res = await call(routes, CHECKIN_SETTINGS, { method: 'POST', body })
+    assert.equal(res.state.status, 400, `body=${JSON.stringify(body)} 必须 400`)
+    assert.equal(res.jsonBody().error, 'CHECKIN_SETTINGS_INVALID / HTTP 400')
+  }
+  assert.equal(calls.setCheckinEnabled, 0, '非法输入不得触达任何 seam')
+  assert.deepEqual(calls, NO_CALLS)
+})
+
+test('POST /checkin/settings 跨源 → 403，且零 seam 调用（不得被跨源页面改开关）', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps, calls } = makeDeps()
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, CHECKIN_SETTINGS, {
+    method: 'POST',
+    headers: { origin: 'http://evil.example', host: '127.0.0.1:3080' },
+    body: { enabled: true },
+  })
+
+  assert.equal(res.state.status, 403)
+  assert.deepEqual(calls, NO_CALLS)
+})
+
+test('POST /checkin/now 同源 → 200 投影摘要；依赖缺席时两条路由降级为 checkin disabled', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps, calls } = makeDeps()
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, CHECKIN_NOW, { method: 'POST' })
+  assert.equal(res.state.status, 200)
+  assert.equal(calls.runCheckinNow, 1)
+  assert.deepEqual(res.jsonBody(), { ok: true, checkin: { enabled: true, totalAccounts: 2, doneToday: 2, skippedToday: 0, failedToday: 0, lastRunAt: 1700000000001 } })
+  assertNoSecret(res.state.raw, 'POST /checkin/now')
+
+  // 未接线（authDir 为空 / 服务缺席）时不得 500，而是明确的降级。
+  const bareCtx = makeCtx()
+  const bare = makeDeps({ setCheckinEnabled: undefined, runCheckinNow: undefined })
+  registerRoutes(bareCtx.ctx, bare.deps)
+  const settings = await call(bareCtx.routes, CHECKIN_SETTINGS, { method: 'POST', body: { enabled: true } })
+  const now = await call(bareCtx.routes, CHECKIN_NOW, { method: 'POST' })
+  assert.equal(settings.state.status, 200)
+  assert.deepEqual(settings.jsonBody(), { ok: false, error: 'checkin disabled' })
+  assert.equal(now.state.status, 200)
+  assert.deepEqual(now.jsonBody(), { ok: false, error: 'checkin disabled' })
+  assert.deepEqual(bare.calls, NO_CALLS)
+})
+
+test('签到摘要投影是逐字段白名单：注入的令牌/路径/未知字段一律丢弃', async () => {
+  const { ctx, routes } = makeCtx()
+  const tok = 'SYNTHETIC-ACCESS'.repeat(8)
+  const sec = 'SECRET-A'.repeat(20)
+  const { deps } = makeDeps({
+    runCheckinNow: async () => ({
+      enabled: true,
+      totalAccounts: 1,
+      doneToday: 1,
+      skippedToday: 0,
+      failedToday: 0,
+      lastRunAt: 1700000000002,
+      accessToken: tok,
+      credentialFile: 'C:\\synthetic-root\\synthetic-user\\AppData\\Local\\Tencent-Cloud.coding-copilot.info',
+      accounts: [{ id: 'managed:x', accessToken: sec }],
+      progress: 'done',
+    }),
+  })
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, CHECKIN_NOW, { method: 'POST' })
+
+  assert.equal(res.state.status, 200)
+  assert.deepEqual(Object.keys(res.jsonBody()).sort(), ['checkin', 'ok'])
+  assert.deepEqual(Object.keys(res.jsonBody().checkin).sort(), ['doneToday', 'enabled', 'failedToday', 'lastRunAt', 'skippedToday', 'totalAccounts'])
+  assert.equal(String(res.state.raw).includes('synthetic-user'), false)
+  assertNoSecret(res.state.raw, 'POST /checkin/now（投影）')
 })

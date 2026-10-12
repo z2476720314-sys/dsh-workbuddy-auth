@@ -36,9 +36,10 @@ test('NON_PERIODIC_TOKEN 自检：非零偏移的 64 位片段不等于任何前
   }
 })
 
+const SEC_A = 'SECRET-A'.repeat(20)
 const RAW = JSON.stringify({
   account: { uid: '00000000-1111-4222-8333-444444444444', nickname: '测试用户', phoneNumber: '13800001234' },
-  auth: { accessToken: 'SECRET-A'.repeat(20), refreshToken: 'SECRET-R'.repeat(20), expiresAt: 1702592000000, refreshExpiresAt: 1705184000000, lastRefreshTime: 1700000000000 },
+  auth: { accessToken: SEC_A, refreshToken: 'SECRET-R'.repeat(20), expiresAt: 1702592000000, refreshExpiresAt: 1705184000000, lastRefreshTime: 1700000000000 },
 })
 
 test('buildStatus 只暴露脱敏字段', () => {
@@ -78,11 +79,15 @@ test('buildStatus 的字段白名单：多一个字段就可能多一处令牌�
   const s = buildStatus({ rawText: RAW, now: 1700000000000, userAgentFix: true, upstreamHost: 'copilot.tencent.com' })
   // 多账号启用后 buildStatus 恒定带 accounts 字段（未启用时 enabled:false），
   // 且它的内部结构同样被白名单钉住（见 status-multi-account.test.mjs）。
-  assert.deepEqual(Object.keys(s).sort(), ['account', 'accounts', 'ok', 'state', 'token'])
+  // 签到（签到计划 Task 4）同理恒定带 checkin 字段（服务缺席时为关闭的零值）。
+  assert.deepEqual(Object.keys(s).sort(), ['account', 'accounts', 'checkin', 'ok', 'state', 'token'])
+  assert.deepEqual(Object.keys(s.checkin).sort(), ['doneToday', 'enabled', 'failedToday', 'lastRunAt', 'skippedToday', 'totalAccounts'])
   assert.deepEqual(Object.keys(s.accounts).sort(), ['activeId', 'enabled', 'sources'])
   assert.deepEqual(Object.keys(s.account).sort(), ['nickname', 'phoneMasked', 'uidTail'])
   assert.deepEqual(Object.keys(s.token).sort(), ['accessDaysLeft', 'accessExpiresAt', 'lastRefreshTime', 'refreshDaysLeft', 'refreshExpiresAt'])
-  assert.deepEqual(Object.keys(s.state).sort(), ['credentialReadable', 'upstreamHost', 'userAgentFix'])
+  // credentialEncrypted / credentialHint 是 0.2.3 起的固定字段：加密凭据与「下一步做什么」
+  // 必须走这条白名单路径透出，而不是让前端去猜错误文案（见 route-error-hint.test.mjs）。
+  assert.deepEqual(Object.keys(s.state).sort(), ['credentialEncrypted', 'credentialHint', 'credentialReadable', 'upstreamHost', 'userAgentFix'])
   // 成功路径不得带 error 字段（唯一允许出现在失败路径上的可读错误）。
   assert.equal('error' in s, false)
 })
@@ -288,6 +293,59 @@ test('maskPhone / tail 对非字符串输入安全降级', () => {
   assert.equal(tail('abcdef', 0), '')
   assert.equal(tail('abcdef', -1), '')
   assert.equal(maskPhone('1234567'), '123****4567')
+})
+
+const CHECKIN_RAW = JSON.stringify({
+  auth: { accessToken: 'ck-tok1', refreshToken: 'checkin-refresh-0002', expiresAt: 1_760_000_000_000 + 86_400_000, refreshExpiresAt: 0, lastRefreshTime: 0 },
+  account: { uid: 'uid-checkin-0001', nickname: '签到用户', phoneNumber: '13800000007' },
+})
+
+test('withCheckin：status 携带签到白名单 DTO，计数取整、脏键与令牌一律丢弃', async () => {
+  const { withCheckin } = await import('../lib/status.mjs')
+  const envelope = withCheckin(CHECKIN_RAW, {
+    enabled: true,
+    totalAccounts: 3.9,
+    doneToday: 2,
+    skippedToday: 1,
+    failedToday: 0,
+    lastRunAt: 1_760_000_000_000,
+    accessToken: 'ck-tok1',
+    filePath: 'C:\\synthetic-root\\someone\\workbuddy-auth-checkin.json',
+    outcomes: [{ accountId: 'managed:x', done: true }],
+  })
+  const status = buildStatus({ rawText: envelope, now: 1_760_000_000_000 })
+  assert.deepEqual(status.checkin, {
+    enabled: true,
+    totalAccounts: 3,
+    doneToday: 2,
+    skippedToday: 1,
+    failedToday: 0,
+    lastRunAt: 1_760_000_000_000,
+  }, '签到 DTO 必须只有白名单六个键')
+  assert.equal(JSON.stringify(status).includes('ck-tok1'), false)
+  assert.equal(JSON.stringify(status).includes('C:\\\\Users'), false)
+  assert.equal(JSON.stringify(status).includes('managed:x'), false)
+})
+
+test('withCheckin：缺席时给出关闭的零值 DTO（设置卡无需区分「没有签到」与「签到关闭」）', () => {
+  const status = buildStatus({ rawText: CHECKIN_RAW, now: 1_760_000_000_000 })
+  assert.deepEqual(status.checkin, { enabled: false, totalAccounts: 0, doneToday: 0, skippedToday: 0, failedToday: 0, lastRunAt: 0 })
+})
+
+test('withCheckin 与 withCredits 叠加：异步摘要互不覆盖，失败降级为关闭的零值', async () => {
+  const { withCheckin, withCredits } = await import('../lib/status.mjs')
+  const envelope = withCheckin(
+    withCredits(CHECKIN_RAW, Promise.resolve({ ok: true, remaining: 5, total: 10, used: 5, fetchedAt: 1_760_000_000_000 })),
+    Promise.resolve({ enabled: true, totalAccounts: 1, doneToday: 1, skippedToday: 0, failedToday: 0, lastRunAt: 2 }),
+  )
+  const status = await buildStatus({ rawText: envelope, now: 1_760_000_000_000 })
+  assert.equal(status.credits.ok, true)
+  assert.equal(status.credits.remaining, 5)
+  assert.equal(status.checkin.doneToday, 1)
+
+  const rejected = await buildStatus({ rawText: withCheckin(CHECKIN_RAW, Promise.reject(new Error('store unreadable'))), now: 1_760_000_000_000 })
+  assert.equal(rejected.ok, true, '签到状态读失败不得让整个 status 失败')
+  assert.deepEqual(rejected.checkin, { enabled: false, totalAccounts: 0, doneToday: 0, skippedToday: 0, failedToday: 0, lastRunAt: 0 })
 })
 
 test('buildStatus 无参调用不抛错（route 层依赖它必须永远返回一个对象）', () => {

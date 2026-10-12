@@ -18,10 +18,10 @@ npx dsh-workbuddy-auth install
 默认安装到 `web` profile。CLI 会先调用官方命令：
 
 ```powershell
-dsh plugin --profile web add dsh-workbuddy-auth@0.2.0
+dsh plugin --profile web add dsh-workbuddy-auth@<当前版本>
 ```
 
-默认 package spec 从本包自己的 `package.json` 读取，固定为 `dsh-workbuddy-auth@0.2.0`，避免安装时漂移到未审计版本。DSH 根据本包的 `dsh.bundle.patch` 自动加入 Host 插件行；同一 package row 的 `dsh.client` 元数据会加载 Client 设置卡。
+默认 package spec 从本包自己的 `package.json` 读取（形如 `dsh-workbuddy-auth@0.3.0`），避免安装时漂移到未审计版本。DSH 根据本包的 `dsh.bundle.patch` 自动加入 Host 插件行；同一 package row 的 `dsh.client` 元数据会加载 Client 设置卡。
 
 从旧 PowerShell 安装器一键升级时，直接运行同一条 `npx dsh-workbuddy-auth install` 即可同时迁移两处旧 ownership：CLI 会识别 `settings.yaml` 中精确、完整且唯一的四空格 `BEGIN/END dsh-workbuddy-auth managed provider` 旧块，把其 `workbuddy:` pair 更新成新的 canonical own node；并在 `plugin add` 前备份、移除 profile `cordis.patch.yml` 中精确的旧 `BEGIN/END dsh-workbuddy-auth managed block`，让 npm bundle patch 接管。BOM、CRLF、quoted top-level keys 以及其他合法 provider 会保留语义；无标记的 `workbuddy`、未知/畸形/重复/混合 marker 或无标记同 ID patch 行均会拒绝安装，不覆盖未知配置。plugin add 或后续 settings 阶段失败时会恢复旧 patch/settings。
 
@@ -121,9 +121,26 @@ CLI 对底层 fs/Node/YAML 错误只输出封闭错误码对应的固定文案�
 - 只对 WorkBuddy 上游 hostname 生效的 User-Agent workaround；
 - Web 设置卡：脱敏账号状态、余额、连接测试、刷新和重新读取；
 - **多账号切换**：安装后设置卡会出现「切换账号」区，可随时在多个已登录的 WorkBuddy/CodeBuddy 账号间切换，推理与积分随之切换；`X-User-Id` 会跟随当前账号动态发送，无需手工改配置；
+- **浏览器登录添加账号**：设置卡「添加账号」区选 CN / Intl 后点「开始登录」，在浏览器完成 CodeBuddy 授权即把账号加入本插件的账号池；登录只添加、不切换当前账号；
+- **地区感知**：CN 账号走 `copilot.tencent.com`；Intl 账号（`workbuddy.ai` / `codebuddy.ai`）按账号所属地区解析上游 origin，刷新头随地区切换，推理请求改写 origin 但保留 path/query。地区无法确定时拒绝请求，绝不把 CN 当作 Intl 的回退；Intl 账号的余额显示 `unavailable`；
+- **自动签到**：默认开启，启动即跑一轮、之后每 10 分钟检查一次，只处理 CN 账号；设置卡提供开关与「立即签到」；
 - 浏览器响应不包含 token、refresh token、上游响应体或本地路径。
 
 本项目不提供聊天页脚的单次积分估算；余额仅采用 WorkBuddy 服务端返回的权威值。
+
+## 数据保留
+
+运行时会在 `$DSH_HOME/storages/` 下创建三个文件，卸载时**不自动删除**（CLI 无法安全证明其 ownership）：
+
+| 文件 | 内容 | 加密 |
+| --- | --- | --- |
+| `workbuddy-accounts.dpapi` | 浏览器登录添加的托管账号池 | Windows 当前用户 DPAPI（整库加密） |
+| `workbuddy-auth-checkin.json` | 签到开关、每账号的本地日期/次数/结果时间戳 | 明文，**不含任何令牌或路径** |
+| `workbuddy-auth-rejected.json` | 被上游 401/403 拒绝过的账号 id 摘要 | 明文，只存 id 摘要 |
+
+不再需要时可直接删除这三个文件：`workbuddy-accounts.dpapi` 删除后登录添加的账号会消失（桌面 CodeBuddy 凭据不受影响），签到状态删除后会在下一轮重新统计当日状态。DPAPI 不可用（例如非 Windows）时不会回退明文存储——托管账号库与浏览器登录整块缺席，桌面凭据文件照常工作。
+
+签到状态文件刻意用 `workbuddy-auth-checkin.json` 这个独立名字：`@eddyskywalker/dsh-chatgpt-subscription` 用的是 `workbuddy-checkin.json`，两者格式不同，同名会互相覆盖。
 
 ## 开发与测试
 

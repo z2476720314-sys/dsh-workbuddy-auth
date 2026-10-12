@@ -5,13 +5,15 @@
 //   * 唯一能接触网络的路径（apply 组装的 refresh）用**计数型 spy fetch** 注入，
 //     并断言「刷新前置条件不成立时 fetch 调用次数为 0」；
 //   * 时间通过 deps.now 注入（见节流用例），不依赖真实等待。
-// 所有 token 均为运行时合成的假串（live / old / brand-new / R），不含任何真实机密。
+// 所有 token 均为运行时合成的假串（live / old / new-tok / R），不含任何真实机密。
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
+import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { syncCredential, createSyncDeps, runSync, apply, TOKEN_REF, REFRESH_MARGIN_MS, TICK_MS, name, inject } from '../lib/index.mjs'
 import { installUserAgentFix } from '../lib/user-agent.mjs'
+import { sealedSeams } from './fixtures/sealed-seams.mjs'
 
 const raw = JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'live', refreshToken: 'R', tokenType: 'Bearer', expiresAt: Date.now() + 90 * 864e5 } })
 
@@ -26,7 +28,7 @@ const baseDeps = (over = {}) => ({
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 /** 计数型 spy fetch：记录调用次数，绝不发真实请求。 */
-const spyFetch = (respond = async () => ({ ok: true, status: 200, text: async () => '{"data":{"accessToken":"brand-new"}}' })) => {
+const spyFetch = (respond = async () => ({ ok: true, status: 200, text: async () => '{"data":{"accessToken":"new-tok"}}' })) => {
   const calls = []
   const impl = async (url, init) => {
     calls.push({ url, init })
@@ -54,13 +56,13 @@ test('临近过期时刷新、写回文件并更新 seam', async () => {
   const calls = []
   const r = await syncCredential(baseDeps({
     readFile: async () => soon,
-    refresh: async () => ({ accessToken: 'brand-new' }),
+    refresh: async () => ({ accessToken: 'new-tok' }),
     writeFile: async (text) => calls.push(['write', JSON.parse(text).auth.accessToken]),
     setCredential: async () => calls.push(['set']),
   }))
   assert.equal(r.refreshed, true)
-  assert.equal(r.token, 'brand-new')
-  assert.deepEqual(calls, [['write', 'brand-new'], ['set']])
+  assert.equal(r.token, 'new-tok')
+  assert.deepEqual(calls, [['write', 'new-tok'], ['set']])
 })
 
 test('读取失败时抛出且不写 seam', async () => {
@@ -106,11 +108,11 @@ test('createSyncDeps 显式注入 fetch：刷新走注入实现，未提供的�
   assert.equal(fetchImpl.calls.length, 1, '刷新必须走注入的 fetch，而不是全局 fetch')
   assert.equal(fetchImpl.calls[0].init.headers['X-Refresh-Token'], 'R')
   assert.equal(r.refreshed, true)
-  assert.equal(r.token, 'brand-new')
+  assert.equal(r.token, 'new-tok')
   // undefined 的语义是「本次响应没给，沿用旧值」：既不能丢键，也不能被改写为 0 / null / ''。
   assert.equal(written.auth.refreshToken, 'R')
   assert.equal(written.auth.expiresAt, JSON.parse(soon).auth.expiresAt)
-  assert.equal(written.auth.accessToken, 'brand-new')
+  assert.equal(written.auth.accessToken, 'new-tok')
 })
 
 test('刷新失败时不写文件、不写 seam，错误向上抛出', async () => {
@@ -138,11 +140,11 @@ test('apply：启动读取失败只告警不抛错，日志无令牌，dispose �
   const ctx = {
     credentials: { set: async () => { setCalls += 1 } },
     logger: { info: (m) => infos.push(String(m)), warn: (m) => warnings.push(String(m)) },
-    // 收集**全部** effect 的 disposer：apply 现在注册两个副作用（上游 UA 修复 + 凭据同步轮询），
-    // 两个都必须在卸载时复原，只留最后一个会漏掉另一个（并让包装层残留在 globalThis.fetch 上）。
+    // 收集**全部** effect 的 disposer：apply 现在注册三个副作用（上游 UA 修复 + 凭据同步轮询 + 自动签到），
+    // 每个都必须在卸载时复原，只留最后一个会漏掉其余（并让包装层残留在 globalThis.fetch 上）。
     effect: (fn) => { disposers.push(fn()) },
     // 设置卡路由走**声明式**依赖（`ctx.inject(['webServer'], cb)`，见 lib/index.mjs）。
-    // 本用例是非 web 组合：webServer 永不到来，回调不执行，因此 effect 恰好是两个。
+    // 本用例是非 web 组合：webServer 永不到来，回调不执行，因此 effect 恰好是三个。
     inject: () => ({ deps: ['webServer'] }),
   }
 
@@ -157,10 +159,12 @@ test('apply：启动读取失败只告警不抛错，日志无令牌，dispose �
 
   try {
     // 指向一个不存在的临时路径：读盘 ENOENT，因此既不碰真实凭据文件，也走不到网络/写盘。
-    apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-apply-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 5 })
+    apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-apply-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 5 }, sealedSeams())
 
-    await delay(30)
-    assert.equal(disposers.length, 2, 'apply 必须把上游 UA 修复与凭据同步轮询都注册为可回收副作用')
+    // 等告警落定而不是固定 delay：满负载跑整个套件时 30ms 不够（曾经因此假红过一次）。
+    const deadline = Date.now() + 3000
+    while (warnings.length === 0 && Date.now() < deadline) await delay(10)
+    assert.equal(disposers.length, 3, 'apply 必须把上游 UA 修复、凭据同步轮询与自动签到都注册为可回收副作用')
     assert.ok(disposers.every((d) => typeof d === 'function'), 'apply 必须通过 ctx.effect 注册可回收的副作用')
     assert.ok(warnings.length >= 1, '启动失败必须留下告警')
     assert.match(warnings[0], /startup failed/)
@@ -170,8 +174,9 @@ test('apply：启动读取失败只告警不抛错，日志无令牌，dispose �
     assert.ok(!warnings.join(' ').includes('live'), '日志不得出现令牌值')
 
     for (const d of disposers) d()
-    assert.equal(intervals.length, 1, 'apply 应恰好创建一个轮询定时器')
-    assert.ok(cleared.includes(intervals[0]), 'dispose 必须清掉定时器，而不是只置停止标志')
+    assert.equal(intervals.length, 2, 'apply 应恰好创建两个轮询定时器：凭据同步与签到各一')
+    assert.ok(cleared.includes(intervals[0]), 'dispose 必须清掉凭据同步定时器，而不是只置停止标志')
+    assert.ok(cleared.includes(intervals[1]), 'dispose 必须清掉签到定时器，而不是只置停止标志')
 
     await delay(20) // 让 dispose 之前已触发的最后一次 tick 告警落定
     const settled = warnings.length
@@ -211,17 +216,17 @@ test('刷新节流（a/c）：刷新响应缺 expiresAt 时，后续 tick 不再
   assert.equal(first.refreshed, true)
   assert.equal(first.throttled, false)
   assert.equal(first.staleAfterRefresh, true, '响应缺 expiresAt，合并后记录仍在阈值内')
-  assert.equal(first.token, 'brand-new')
+  assert.equal(first.token, 'new-tok')
   assert.equal(fetchImpl.calls.length, 1)
-  assert.deepEqual(writes, ['brand-new'])
-  assert.deepEqual(sets, [[TOKEN_REF, 'brand-new']])
+  assert.deepEqual(writes, ['new-tok'])
+  assert.deepEqual(sets, [[TOKEN_REF, 'new-tok']])
 
   // 一个 tick（10 分钟）之后：记录依然「临近过期」，但节流必须挡住第二次 refresh token 轮换。
   clock.t += TICK_MS
   const second = await syncCredential(deps)
   assert.equal(second.refreshed, false, '第二次不得再刷新')
   assert.equal(second.throttled, true)
-  assert.equal(second.token, 'brand-new', '沿用上一次刷新写回的 token')
+  assert.equal(second.token, 'new-tok', '沿用上一次刷新写回的 token')
   assert.equal(fetchImpl.calls.length, 1, '第二次必须零新增网络调用')
   assert.equal(writes.length, 1, '第二次不得重写凭据文件')
   assert.equal(sets.length, 2, 'seam 仍要更新（当前 token 可用）')
@@ -247,7 +252,7 @@ test('刷新节流（a）不会误伤正常路径：拿到足够远的 expiresAt
   const clock = { t: T0 }
   let fileText = JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'old', refreshToken: 'R', expiresAt: T0 + 1000 } })
   // 正常响应：带一个足够远的 expiresAt（30 天），刷新后应完全脱离阈值。
-  const fetchImpl = spyFetch(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ data: { accessToken: 'brand-new', expiresAt: T0 + 30 * 864e5 } }) }))
+  const fetchImpl = spyFetch(async () => ({ ok: true, status: 200, text: async () => JSON.stringify({ data: { accessToken: 'new-tok', expiresAt: T0 + 30 * 864e5 } }) }))
   const deps = {
     ...createSyncDeps({ credentials: { set: async () => {} } }, {}, fetchImpl),
     readFile: async () => fileText,
@@ -272,7 +277,7 @@ test('失效告警（b）：刷新后仍在阈值内时，打出区别于失败 
   const logger = { info: (m) => infos.push(String(m)), warn: (m) => warnings.push(String(m)) }
   const soon = JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'old', refreshToken: 'R', expiresAt: Date.now() + 1000 } })
 
-  const r = await runSync(baseDeps({ readFile: async () => soon, refresh: async () => ({ accessToken: 'brand-new' }) }), logger, 'tick')
+  const r = await runSync(baseDeps({ readFile: async () => soon, refresh: async () => ({ accessToken: 'new-tok' }) }), logger, 'tick')
 
   assert.equal(r.refreshed, true)
   assert.equal(r.staleAfterRefresh, true, '响应缺 expiresAt 时必须标记为「仍在阈值内」')
@@ -281,7 +286,7 @@ test('失效告警（b）：刷新后仍在阈值内时，打出区别于失败 
   assert.match(warnings[0], /expiresAt/, '告警必须点明是服务端没给到期字段')
   assert.doesNotMatch(warnings[0], /failed/, '必须与读/刷新/写回失败的普通 warn 区分开')
   assert.ok(infos.some((m) => m.includes('token ready')), '成功路径的 info 仍然保留')
-  assert.ok(!`${infos.join(' ')} ${warnings.join(' ')}`.includes('brand-new'), '日志不得出现令牌值')
+  assert.ok(!`${infos.join(' ')} ${warnings.join(' ')}`.includes('new-tok'), '日志不得出现令牌值')
 })
 
 test('节流是可观测的：被挡下的那次同步留下 info（不是告警）说明原因', async () => {
@@ -294,7 +299,7 @@ test('节流是可观测的：被挡下的那次同步留下 info（不是告警
   let refreshCalls = 0
   const deps = baseDeps({
     readFile: async () => soon,
-    refresh: async () => { refreshCalls += 1; return { accessToken: 'brand-new' } },
+    refresh: async () => { refreshCalls += 1; return { accessToken: 'new-tok' } },
     now: () => clock.t,
   })
 
@@ -334,7 +339,7 @@ test('重入保护：上一次同步仍在飞时，后续 tick 直接跳过、�
   let refreshCalls = 0
   const deps = baseDeps({
     readFile: async () => soon,
-    refresh: async () => { refreshCalls += 1; await blocked; return { accessToken: 'brand-new' } },
+    refresh: async () => { refreshCalls += 1; await blocked; return { accessToken: 'new-tok' } },
     setCredential: async () => {},
     now: () => clock.t,
   })
@@ -350,7 +355,7 @@ test('重入保护：上一次同步仍在飞时，后续 tick 直接跳过、�
   release()
   const r = await first
   assert.equal(r.refreshed, true)
-  assert.equal(r.token, 'brand-new')
+  assert.equal(r.token, 'new-tok')
   assert.equal(refreshCalls, 1)
 
   // 在飞标记必须被清掉：下一次 tick 仍能正常刷新（否则会把续期永久卡死）。
@@ -366,7 +371,7 @@ test('凭据文件缺失：告警给出可执行指引与安全文件定位，�
   const warnings = []
   const infos = []
   const logger = { info: (m) => infos.push(String(m)), warn: (m) => warnings.push(String(m)) }
-  const missing = 'C:\\Users\\synthetic-user\\private-temp\\Tencent-Cloud.coding-copilot.info'
+  const missing = 'C:\\synthetic-root\\synthetic-user\\private-temp\\Tencent-Cloud.coding-copilot.info'
   const safeDisplayPath = String.raw`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\Tencent-Cloud.coding-copilot.info`
   const err = new Error(`ENOENT: no such file or directory, open '${missing}'`)
   err.code = 'ENOENT'
@@ -384,13 +389,29 @@ test('凭据文件缺失：告警给出可执行指引与安全文件定位，�
   assert.deepEqual(infos, [], '失败路径不得报告 token ready')
 })
 
-test('非凭据缺失类错误不得误报登录指引', async () => {
+test('401 不得误报「未登录」指引，只能给「登录态已失效」这一类的动作', async () => {
+  // 这里的边界很容易搞错：401 的病因是 refresh token 被作废（切到了历史备份、或其它客户端轮换过），
+  // 而不是「本机从未登录」。两者都提到 codebuddy，但**说的是不同的事** ——
+  // 「未登录」指引是「请先运行一次 codebuddy 完成登录并等待下一次同步」，
+  // 而 401 指引是「换账号，或重新登录后点『重新读取』」。用固定句而不是 /codebuddy/ 来钉住。
   const warnings = []
   const logger = { info: () => {}, warn: (m) => warnings.push(String(m)) }
   await runSync(baseDeps({ refresh: async () => { throw new Error('refresh failed: HTTP 401') }, readFile: async () => JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'old', refreshToken: 'R', expiresAt: Date.now() + 1000 } }) }), logger, 'tick')
   assert.equal(warnings.length, 1)
   assert.match(warnings[0], /HTTP 401/)
-  assert.doesNotMatch(warnings[0], /codebuddy/, '刷新失败与"未登录"是两回事，不能给错指引')
+  assert.doesNotMatch(warnings[0], /未找到可用的 CodeBuddy 登录态/, '401 不是「没登录」，不能给未登录指引')
+  assert.doesNotMatch(warnings[0], /等待下一次同步（默认 10 分钟）/, '未登录指引的收尾句也不得出现')
+  assert.match(warnings[0], /登录态已失效/, '401 必须给出属于它自己的可行动指引')
+})
+
+// 5xx / 429 与凭据无关：既不能给「未登录」指引，也不能给「登录态失效」指引。
+test('服务端故障（503）不产出任何凭据类指引', async () => {
+  const warnings = []
+  const logger = { info: () => {}, warn: (m) => warnings.push(String(m)) }
+  await runSync(baseDeps({ refresh: async () => { throw new Error('refresh failed: HTTP 503') }, readFile: async () => JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'old', refreshToken: 'R', expiresAt: Date.now() + 1000 } }) }), logger, 'tick')
+  assert.equal(warnings.length, 1)
+  assert.doesNotMatch(warnings[0], /登录态已失效/)
+  assert.doesNotMatch(warnings[0], /未找到可用的 CodeBuddy 登录态/)
 })
 
 test('同步依赖抛错时日志只保留结构化状态，不回显任意错误消息中的令牌值', async () => {
@@ -415,7 +436,7 @@ test('写回路径 EPERM/EACCES 不得误报登录指引，应指向文件占用
   // 把用户指向完全错误的原因（登录态其实好着呢，只是文件被占着写不进去）。
   const warnings = []
   const logger = { info: () => {}, warn: (m) => warnings.push(String(m)) }
-  const file = 'C:\\Users\\synthetic-user\\locked\\Tencent-Cloud.coding-copilot.info'
+  const file = 'C:\\synthetic-root\\synthetic-user\\locked\\Tencent-Cloud.coding-copilot.info'
   const safeDisplayPath = String.raw`%LOCALAPPDATA%\CodeBuddyExtension\Data\Public\auth\Tencent-Cloud.coding-copilot.info`
   const soon = JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'old', refreshToken: 'R', expiresAt: Date.now() + 1000 } })
 
@@ -426,7 +447,7 @@ test('写回路径 EPERM/EACCES 不得误报登录指引，应指向文件占用
 
     const r = await runSync(baseDeps({
       readFile: async () => soon,
-      refresh: async () => ({ accessToken: 'brand-new' }),
+      refresh: async () => ({ accessToken: 'new-tok' }),
       writeFile: async () => { throw err },
       credentialFilePath: file,
     }), logger, 'tick')
@@ -462,7 +483,7 @@ const makeApplyCtx = () => {
       logger: { info: (m) => infos.push(String(m)), warn: (m) => warnings.push(String(m)) },
       effect: (fn) => { disposers.push(fn()) },
       // 设置卡路由声明式依赖（lib/index.mjs）：本组用例不提供 webServer，
-      // 因此回调永不执行，effect 数仍是 2（UA 修复 + 凭据同步）。
+      // 因此回调永不执行，effect 数仍是 3（UA 修复 + 凭据同步 + 自动签到）。
       inject: () => ({ deps: ['webServer'] }),
     },
   }
@@ -482,9 +503,9 @@ test('apply 安装上游 UA 修复：写入日志、非目标域名零改动、�
 
   globalThis.fetch = fake
   try {
-    apply(ctx, missingCredentialConfig())
+    apply(ctx, missingCredentialConfig(), sealedSeams())
 
-    assert.equal(disposers.length, 2, 'UA 修复与凭据同步都必须注册为可回收副作用')
+    assert.equal(disposers.length, 3, 'UA 修复、凭据同步与自动签到都必须注册为可回收副作用')
     assert.notEqual(globalThis.fetch, fake, 'apply 必须把上游 UA 修复装到 globalThis.fetch 上')
     assert.ok(
       infos.some((m) => m.includes('user-agent') && m.includes('copilot.tencent.com') && m.includes('dsh-workbuddy/0.1')),
@@ -510,23 +531,29 @@ test('apply 安装上游 UA 修复：写入日志、非目标域名零改动、�
   }
 })
 
-test('apply 的 upstreamHost / upstreamUserAgent 配置生效且只影响目标域名', async () => {
+test('apply 的 upstreamHost / upstreamUserAgent 配置生效，且不放过 WorkBuddy 后端', async () => {
   const realFetch = globalThis.fetch
   const fake = spyFetch()
   const { ctx, disposers, infos } = makeApplyCtx()
 
   globalThis.fetch = fake
   try {
-    apply(ctx, missingCredentialConfig({ upstreamHost: 'upstream.example', upstreamUserAgent: 'custom/9' }))
+    apply(ctx, missingCredentialConfig({ upstreamHost: 'upstream.example', upstreamUserAgent: 'custom/9' }), sealedSeams())
 
     assert.ok(infos.some((m) => m.includes('upstream.example') && m.includes('custom/9')), `日志必须写明实际生效的 host/UA，实际：${JSON.stringify(infos)}`)
 
     await globalThis.fetch('https://upstream.example/v1/chat/completions', { headers: {} })
     assert.equal(new Headers(fake.calls[0].init.headers).get('user-agent'), 'custom/9')
 
-    const init = { headers: { 'user-agent': 'deepseek-harness/0.1.5-rc.1' } }
-    await globalThis.fetch('https://copilot.tencent.com/v1/chat/completions', init)
-    assert.equal(fake.calls[1].init, init, '默认域名不在本次自定义范围内，必须原样透传')
+    // 拦截集合（Task 5 起的契约）：WorkBuddy 后端（CN 网关 + 两个 Intl origin）**始终**在内，
+    // 自定义 host 只是「额外还拦哪个域」。否则 Intl 账号的推理请求会被原样发去 CN 网关。
+    await globalThis.fetch('https://copilot.tencent.com/v1/chat/completions', { headers: { 'user-agent': 'deepseek-harness/0.1.5-rc.1' } })
+    assert.equal(new Headers(fake.calls[1].init.headers).get('user-agent'), 'custom/9', 'WorkBuddy 后端必须仍在拦截集合内')
+
+    // 与本次配置无关的第三方域名：原样透传（对象同一性）。
+    const untouched = { headers: { 'user-agent': 'deepseek-harness/0.1.5-rc.1' } }
+    await globalThis.fetch('https://api.deepseek.com/v1/models', untouched)
+    assert.equal(fake.calls[2].init, untouched, '无关域名必须原样透传')
   } finally {
     for (const d of disposers) d?.()
     await delay(20)
@@ -545,7 +572,7 @@ test('已有包装层时 apply 只记一行跳过日志，且卸载本插件不�
     const preLayer = globalThis.fetch
     assert.equal(pre.installed, true)
 
-    apply(ctx, missingCredentialConfig())
+    apply(ctx, missingCredentialConfig(), sealedSeams())
 
     assert.equal(globalThis.fetch, preLayer, '不得叠加第二层包装')
     assert.ok(infos.some((m) => m.includes('skipped')), `跳过安装同样必须留下日志，实际：${JSON.stringify(infos)}`)
@@ -559,5 +586,102 @@ test('已有包装层时 apply 只记一行跳过日志，且卸载本插件不�
     for (const d of disposers) d?.()
     await delay(20)
     globalThis.fetch = realFetch
+  }
+})
+
+// ---- 复核修复：seam 写入必须与「读到的账号」同身份 ----
+//
+// 场景（复核 P1）：激活切换与在飞同步交错时，旧账号的刷新结果不得写进新账号的凭据，
+// 也不得把 seam 钉回旧账号 —— 否则推理请求会带着上一位用户的 token 打到上游。
+
+const IDENTITY_A = 'managed:acct-a'
+
+const identityDeps = (over = {}) => ({
+  readFile: async () => ({ accountId: IDENTITY_A, text: JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'old', refreshToken: 'R', expiresAt: Date.now() + 1000 } }) }),
+  refresh: async () => ({ accessToken: 'new-tok' }),
+  writeFile: async () => {},
+  setCredential: async () => {},
+  isActiveAccount: async () => true,
+  ...over,
+})
+
+test('syncCredential：读到的账号已不是当前激活时跳过 seam 写入，且写回仍钉在该账号上', async () => {
+  const calls = []
+  const r = await syncCredential(identityDeps({
+    writeFile: async (text, accountId) => calls.push(['write', accountId, JSON.parse(text).auth.accessToken]),
+    setCredential: async () => calls.push(['set']),
+    isActiveAccount: async () => false,
+  }))
+  assert.equal(r.refreshed, true)
+  assert.equal(r.seamSkipped, true, '账号已切换时必须如实上报跳过 seam')
+  assert.deepEqual(calls, [['write', IDENTITY_A, 'new-tok']], '写回必须钉在读到的账号上，且绝不写 seam')
+})
+
+test('syncCredential：读到的账号仍是当前激活时照常写 seam', async () => {
+  const calls = []
+  const r = await syncCredential(identityDeps({
+    writeFile: async (text, accountId) => calls.push(['write', accountId, JSON.parse(text).auth.accessToken]),
+    setCredential: async () => calls.push(['set']),
+  }))
+  assert.equal(r.seamSkipped, false)
+  assert.deepEqual(calls, [['write', IDENTITY_A, 'new-tok'], ['set']])
+})
+
+test('syncCredential：不支持身份信息的旧 seam（readFile 返回字符串）保持原语义', async () => {
+  const calls = []
+  const seen = []
+  const r = await syncCredential({
+    readFile: async () => JSON.stringify({ account: { uid: 'u1' }, auth: { accessToken: 'old', refreshToken: 'R', expiresAt: Date.now() + 1000 } }),
+    refresh: async () => ({ accessToken: 'new-tok' }),
+    writeFile: async (...args) => { seen.push(args) ; calls.push(['write', args.length]) },
+    setCredential: async () => calls.push(['set']),
+  })
+  assert.equal(r.refreshed, true)
+  assert.equal(seen[0][1], undefined, '字符串 seam 的写回调第二参数应为 undefined')
+  assert.deepEqual(calls, [['write', 2], ['set']])
+  assert.equal(r.seamSkipped, false, '没有身份信息时不得声称跳过 seam')
+})
+
+// —— 自动签到调度（签到计划 Task 3）：apply 必须启动它，并保证卸载时可回收 ——
+//
+// 签到是**默认开启**的后台行为：装上插件就会往上游发请求，因此「什么时候跑、跑多密、
+// 卸载后是否真的停」必须由 apply 级用例钉住，而不是只靠单元测试。
+
+test('apply 启动签到调度：立即跑一轮、周期为 CHECKIN_TICK_MS、dispose 清掉定时器', async () => {
+  const realSetInterval = globalThis.setInterval
+  const realClearInterval = globalThis.clearInterval
+  const realFetch = globalThis.fetch
+  const intervals = []
+  const cleared = []
+  globalThis.setInterval = (...args) => { const handle = realSetInterval(...args); intervals.push({ handle, delay: args[1] }); return handle }
+  globalThis.clearInterval = (handle) => { cleared.push(handle); return realClearInterval(handle) }
+
+  const stateFile = join(tmpdir(), `wb-auth-checkin-${process.pid}-${Date.now()}`, 'storages', 'workbuddy-auth-checkin.json')
+  const fake = spyFetch()
+  const { ctx, disposers } = makeApplyCtx()
+  globalThis.fetch = fake
+  try {
+    apply(ctx, missingCredentialConfig(), sealedSeams({ checkinStateFile: stateFile }))
+    await delay(60)
+
+    const checkinTimer = intervals.find((entry) => entry.delay === 600_000)
+    assert.ok(
+      checkinTimer,
+      `apply 必须按 CHECKIN_TICK_MS（600000）调度签到，实际周期：${JSON.stringify(intervals.map((entry) => entry.delay))}`,
+    )
+
+    // 立即跑一轮的证据：空账号目录也要落 lastRunAt。只创建定时器而等第一个 tick 是不合格的
+    // ——用户装上插件后要马上签到，而不是十分钟后。
+    const state = JSON.parse(await readFile(stateFile, 'utf8'))
+    assert.equal(state.enabled, true, '签到默认开启（用户可关，默认必须是开）')
+    assert.ok(Number.isInteger(state.lastRunAt) && state.lastRunAt > 0, `启动后必须立即跑一轮并落 lastRunAt，实际状态：${JSON.stringify(state)}`)
+    assert.equal(fake.calls.length, 0, '没有账号时签到不得发任何上游请求')
+
+    for (const d of disposers) d()
+    assert.ok(cleared.includes(checkinTimer.handle), 'dispose 必须清掉签到定时器，而不是只置停止标志')
+  } finally {
+    globalThis.fetch = realFetch
+    globalThis.setInterval = realSetInterval
+    globalThis.clearInterval = realClearInterval
   }
 })

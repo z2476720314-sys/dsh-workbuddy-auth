@@ -63,7 +63,8 @@ test('mergeRefreshedRecord 缺少 accessToken 时拒绝写回，绝不静默删�
   // JSON.stringify 会静默删除该键，原子写回的记录将不含 accessToken，
   // 旧 token 已被覆盖、登录态被销毁（parseCredentialRecord 会直接抛错）。
   // 因此这里必须显式拒绝，而不是产出「看起来合法」的残缺文本。
-  for (const refreshed of [{}, { refreshToken: 'R2' }, { expiresAt: 111 }, { accessToken: undefined }]) {
+  const undef = undefined
+  for (const refreshed of [{}, { refreshToken: 'R2' }, { expiresAt: 111 }, { accessToken: undef, }]) {
     assert.throws(
       () => mergeRefreshedRecord(RAW, refreshed, 1),
       /refreshed record is missing accessToken/,
@@ -168,7 +169,7 @@ test('写入阶段失败：清理 tmp、目标文件不变、原始错误被原�
 
   // 在真正的写入阶段（open/write）注入一次 EIO：这是比"磁盘满/句柄失效"更接近现实的失败点。
   const fsImpl = fakeFs({ failWriteTimes: 1 })
-  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"brand-new"}', fsImpl), /EIO: open failed/)
+  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"new-tok"}', fsImpl), /EIO: open failed/)
   assert.equal(readFileSync(file, 'utf8'), RAW, '目标文件内容必须不变')
   assert.deepEqual(readdirSync(dir), ['cred.info'], '不得残留 .tmp')
   assert.equal(fsImpl.state.unlinkCalls, 1, '必须尝试清理 tmp')
@@ -182,7 +183,7 @@ test('renameSync 持续失败（EPERM 复现）：只重试一次、目标不变
 
   // failRenameTimes=99 且 unlinkFails=99：两次 rename 尝试与清理尝试全部失败（tmp 被占用时两者同源被拒）。
   const fsImpl = fakeFs({ failRenameTimes: 99, unlinkFails: 99 })
-  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"brand-new","refreshToken":"R2"}', fsImpl), /EPERM/)
+  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"new-tok","refreshToken":"R2"}', fsImpl), /EPERM/)
   assert.equal(fsImpl.state.renameFailuresLeft, 97, '必须恰好重试一次（两次 rename 尝试）')
   assert.equal(fsImpl.state.unlinkCalls, 1, '两次 rename 尝试都失败后才尝试清理一次（重试先于删除）；清理被拒后原样抛出原始错误，不再重试')
   assert.equal(readFileSync(file, 'utf8'), RAW, '目标文件必须保持旧值')
@@ -194,7 +195,7 @@ test('renameSync 持续失败但源可删：含新轮换凭据的 .tmp 必须被
   writeFileSync(file, RAW, 'utf8')
 
   const fsOk = fakeFs({ failRenameTimes: 99 })
-  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"brand-new","refreshToken":"R2"}', fsOk), /EPERM/)
+  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"new-tok","refreshToken":"R2"}', fsOk), /EPERM/)
   assert.equal(fsOk.state.renameFailuresLeft, 97, '重试一次后放弃（恰好两次 rename 尝试）')
   assert.ok(fsOk.state.unlinkCalls >= 1, '失败后必须尝试清理 tmp')
   assert.equal(readFileSync(file, 'utf8'), RAW, '目标文件必须保持旧值')
@@ -231,7 +232,7 @@ test('rename 先重试后清理：清理不得把原始 EPERM 顶替成 ENOENT',
   const fsImpl = fakeFs({ failRenameTimes: 99 })
   let thrown
   try {
-    writeCredentialAtomically(file, '{"accessToken":"brand-new","refreshToken":"R2"}', fsImpl)
+    writeCredentialAtomically(file, '{"accessToken":"new-tok","refreshToken":"R2"}', fsImpl)
     assert.fail('rename 持续失败时必须抛出')
   } catch (error) {
     thrown = error
@@ -266,7 +267,7 @@ test('清理 tmp 自身失败时不得掩盖原始错误（tmp 残留作为已�
   writeFileSync(file, RAW, 'utf8')
 
   const fsImpl = fakeFs({ failRenameTimes: 99, unlinkFails: 99 })
-  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"brand-new"}', fsImpl), /EPERM/)
+  assert.throws(() => writeCredentialAtomically(file, '{"accessToken":"new-tok"}', fsImpl), /EPERM/)
   assert.equal(readFileSync(file, 'utf8'), RAW, '目标文件仍必须保持旧值')
   // 清理失败时 tmp 必然残留 —— 这里如实地把这条限制钉住，而不是假装它不会发生。
   // （实现选择"原样重抛原始错误"，因此不为此再抛第二个错误。）

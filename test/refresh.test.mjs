@@ -160,3 +160,81 @@ test('refreshCredential 的超时是真实生效的（超时后以 AbortError �
     })
   await assert.rejects(() => refreshCredential(record, fakeFetch, { timeoutMs: 10 }), (e) => e.name === 'TimeoutError' || e.name === 'AbortError')
 })
+
+// —— Task 5：地区化刷新 ——
+// CN 头集是实测可用的（且刷新会**不可逆轮换** refresh token），因此必须逐字节保持不变：
+// 只新增一个可选的 context 入参，缺省路径与改动前完全一致。
+
+const INTL_ORIGIN = 'https://www.workbuddy.ai'
+
+test('CN 刷新（缺省 context）：URL 与头集逐个键都不变，且不注入任何地区头', () => {
+  const { url, init } = buildRefreshRequest(record)
+  assert.equal(url, REFRESH_URL)
+  assert.deepEqual(Object.keys(init.headers).sort(), [
+    'Content-Type',
+    'X-Auth-Refresh-Source',
+    'X-No-Authorization',
+    'X-No-User-Id',
+    'X-Refresh-Token',
+  ])
+  assert.equal(init.headers['X-Auth-Refresh-Source'], 'plugin')
+  assert.equal(init.body, '{}')
+})
+
+test('Intl 刷新：URL 打该地区 origin，source=workbuddy，并带身份头与 origin/referer', () => {
+  const { url, init } = buildRefreshRequest(record, {
+    region: 'intl',
+    authHost: 'login.workbuddy.ai',
+    uid: 'uid-intl-1',
+    domain: 'login.workbuddy.ai',
+  })
+  assert.equal(url, `${INTL_ORIGIN}/v2/plugin/auth/token/refresh`)
+  assert.equal(init.headers['X-Refresh-Token'], 'REFRESH')
+  assert.equal(init.headers['X-Auth-Refresh-Source'], 'workbuddy')
+  assert.equal(init.headers['X-User-Id'], 'uid-intl-1')
+  assert.equal(init.headers['X-Domain'], 'login.workbuddy.ai')
+  assert.equal(init.headers.Origin, INTL_ORIGIN)
+  assert.equal(init.headers.Referer, `${INTL_ORIGIN}/`)
+  assert.equal(init.body, '{}')
+  assert.equal(init.headers.Authorization, undefined, '刷新仍用 X-Refresh-Token，不带 Authorization')
+})
+
+test('codebuddy.ai 属 Intl 但 refresh-source 仍是 plugin（参考实现按域名判定）', () => {
+  const { url, init } = buildRefreshRequest(record, { region: 'intl', authHost: 'codebuddy.ai', uid: 'u1' })
+  assert.equal(url, 'https://www.codebuddy.ai/v2/plugin/auth/token/refresh')
+  assert.equal(init.headers['X-Auth-Refresh-Source'], 'plugin')
+})
+
+test('地区冲突 / 白名单外 origin / 地区未知：拒绝构造请求，绝不跨区发送令牌', () => {
+  assert.throws(() => buildRefreshRequest(record, { region: 'intl', apiOrigin: 'https://evil.example.com' }), /refresh origin is not trusted/)
+  assert.throws(() => buildRefreshRequest(record, { region: 'intl' }), /refresh origin is not trusted/)
+  assert.throws(() => buildRefreshRequest(record, { region: 'cn', authHost: 'www.workbuddy.ai' }), /refresh origin is not trusted/)
+  assert.throws(() => buildRefreshRequest(record, { region: 'cn', apiOrigin: 'https://www.codebuddy.ai' }), /refresh origin is not trusted/)
+})
+
+test('refreshCredential 透传激活上下文：Intl 账号的刷新打到 Intl origin', async () => {
+  let seen = null
+  const fakeFetch = async (url, init) => {
+    seen = { url, init }
+    return { ok: true, status: 200, text: async () => '{"data":{"accessToken":"new","expiresIn":7200}}' }
+  }
+  const got = await refreshCredential(record, fakeFetch, {
+    context: { region: 'intl', authHost: 'login.workbuddy.ai', uid: 'uid-intl-1', domain: 'login.workbuddy.ai' },
+  })
+  assert.equal(seen.url, `${INTL_ORIGIN}/v2/plugin/auth/token/refresh`)
+  assert.equal(seen.init.headers['X-Auth-Refresh-Source'], 'workbuddy')
+  assert.equal(got.accessToken, 'new')
+})
+
+test('refreshCredential 的失败关闭：上下文无法确定地区时不发请求', async () => {
+  let calls = 0
+  const fakeFetch = async () => {
+    calls += 1
+    return { ok: true, status: 200, text: async () => '{"data":{"accessToken":"new"}}' }
+  }
+  await assert.rejects(
+    () => refreshCredential(record, fakeFetch, { context: { region: 'intl', apiOrigin: 'https://evil.example.com' } }),
+    /refresh origin is not trusted/,
+  )
+  assert.equal(calls, 0, '校验失败时一次网络请求都不允许发出')
+})

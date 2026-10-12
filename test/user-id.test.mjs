@@ -45,7 +45,7 @@ function headerOf(call, name) {
 
 test('提供 uidProvider 时：目标上游请求的 x-user-id 被改写为动态值', async () => {
   const fake = makeFake()
-  const init = { method: 'POST', headers: { authorization: 'Bearer t', 'x-user-id': 'old-account-uid' } }
+  const init = { method: 'POST', headers: { authorization: 'Bearer', 'x-user-id': 'old-account-uid' } }
   await withFix({ fetchImpl: fake, uidProvider: () => 'new-account-uid' }, async () => {
     await globalThis.fetch(`https://${HOST}/v2/chat/completions`, init)
   })

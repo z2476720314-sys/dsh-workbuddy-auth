@@ -90,6 +90,54 @@ test('显式 authDir: "" 时：多账号被关闭，status DTO 的 accounts.enab
   }
 })
 
+const CHECKIN_SUMMARY = { enabled: true, totalAccounts: 2, doneToday: 1, skippedToday: 1, failedToday: 0, lastRunAt: 1_760_000_000_000 }
+
+function makeCheckinSeam(over = {}) {
+  return {
+    summary: async () => ({ ...CHECKIN_SUMMARY, ...over }),
+    setEnabled: async () => ({ ...CHECKIN_SUMMARY, ...over }),
+    runManual: async () => ({ ...CHECKIN_SUMMARY, ...over }),
+  }
+}
+
+test('签到服务在场时：status 携带签到摘要，且 GET /status 不触发任何签到网络调用', async () => {
+  const fixture = makeFixture()
+  try {
+    const { ctx } = makeCtx()
+    const config = { authDir: fixture.authDir, credentialFile: join(fixture.authDir, 'Tencent-Cloud.coding-copilot.info') }
+    const syncDeps = createSyncDeps(ctx, config)
+    const calls = []
+    const fetchImpl = async (url) => {
+      calls.push(String(url))
+      return { ok: true, status: 200, text: async () => '{}' }
+    }
+    const deps = createRouteDeps(ctx, config, fetchImpl, syncDeps, undefined, undefined, undefined, makeCheckinSeam())
+    const status = await buildStatus({ rawText: await deps.readCredentialRaw(), now: Date.now() })
+    assert.deepEqual(status.checkin, CHECKIN_SUMMARY, 'status 必须带上签到摘要供设置卡只读展示')
+    assert.equal(
+      calls.some((url) => url.includes('checkin-activity-status') || url.includes('daily-checkin')),
+      false,
+      'GET /status 只读本地状态：绝不能因为展示签到摘要而去打签到端点（余额端点不在此列）',
+    )
+  } finally {
+    rmSync(fixture.home, { recursive: true, force: true })
+  }
+})
+
+test('签到服务缺席（多账号关闭）时：status 的签到 DTO 是关闭的零值', async () => {
+  const fixture = makeFixture()
+  try {
+    const { ctx } = makeCtx()
+    const config = { authDir: fixture.authDir, credentialFile: join(fixture.authDir, 'Tencent-Cloud.coding-copilot.info') }
+    const syncDeps = createSyncDeps(ctx, config)
+    const deps = createRouteDeps(ctx, config, async () => ({ ok: true, status: 200 }), syncDeps, undefined)
+    const status = await buildStatus({ rawText: await deps.readCredentialRaw(), now: Date.now() })
+    assert.deepEqual(status.checkin, { enabled: false, totalAccounts: 0, doneToday: 0, skippedToday: 0, failedToday: 0, lastRunAt: 0 })
+  } finally {
+    rmSync(fixture.home, { recursive: true, force: true })
+  }
+})
+
 test('显式 authDir 覆盖默认目录', async () => {
   const fixture = makeFixture()
   const other = mkdtempSync(join(tmpdir(), 'wb-rstatus-other-'))

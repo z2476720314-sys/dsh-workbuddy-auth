@@ -15,6 +15,7 @@ import {
   hasPluginDependency,
   isPluginInstalled,
   loadDshYaml,
+  profileDependencyRoots,
   loadProfileManifest,
   readCodeBuddyIdentity,
   readSettings,
@@ -216,22 +217,23 @@ async function readOptionalFile(fs, path) {
   return fs.readFile(path, 'utf8')
 }
 
-async function getConfigTools(deps) {
+async function getConfigTools(deps, paths, profile) {
   if (deps.validateSettingsText && deps.settingsEditor && deps.editLegacyPatch) {
     return { validate: deps.validateSettingsText, editor: deps.settingsEditor, editLegacyPatch: deps.editLegacyPatch }
   }
   const commandPath = deps.dshCommandPath ? await deps.dshCommandPath() : await defaultDshCommandPath()
   const dshInstallRoot = resolveDshInstallRoot(commandPath)
-  const yaml = deps.yaml ?? await loadDshYaml(dshInstallRoot)
+  const extraRoots = profileDependencyRoots(paths?.dshHome, profile)
+  const yaml = deps.yaml ?? await loadDshYaml(dshInstallRoot, extraRoots)
   return {
-    validate: deps.validateSettingsText ?? await createDshValidator(dshInstallRoot, yaml),
+    validate: deps.validateSettingsText ?? await createDshValidator(dshInstallRoot, yaml, extraRoots),
     editor: deps.settingsEditor ?? createSettingsEditor(yaml),
     editLegacyPatch: deps.editLegacyPatch ?? createLegacyPatchEditor(yaml),
   }
 }
 
 async function install(options, deps, paths) {
-  const { validate, editor, editLegacyPatch } = await getConfigTools(deps)
+  const { validate, editor, editLegacyPatch } = await getConfigTools(deps, paths, options.profile)
   const original = await deps.fs.readSettings(paths.settingsPath)
   const credentialText = await deps.fs.readFile(paths.credentialPath, 'utf8').catch(() => fail('LOGIN_UNAVAILABLE'))
   const identity = readCodeBuddyIdentity(credentialText)
@@ -326,7 +328,7 @@ async function install(options, deps, paths) {
 }
 
 async function uninstall(options, deps, paths) {
-  const { validate, editor } = await getConfigTools(deps)
+  const { validate, editor } = await getConfigTools(deps, paths, options.profile)
   const original = await deps.fs.readSettings(paths.settingsPath)
   const manifest = await loadProfileManifest(paths.profilePath)
   const pluginExists = hasPluginDependency(manifest) || Boolean(manifest?.dsh?.profile?.bundles?.includes(PACKAGE_NAME))
@@ -398,7 +400,7 @@ async function doctor(options, deps, paths) {
     codebuddyLogin = true
   } catch {}
   try {
-    const { editor } = await getConfigTools(deps)
+    const { editor } = await getConfigTools(deps, paths, options.profile)
     provider = editor.hasManagedProvider(await deps.fs.readSettings(paths.settingsPath))
   } catch {}
   plugin = isPluginInstalled(await loadProfileManifest(paths.profilePath))

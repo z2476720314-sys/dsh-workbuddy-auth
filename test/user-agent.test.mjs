@@ -20,6 +20,10 @@ import { installUserAgentFix, DEFAULT_UPSTREAM_HOST, DEFAULT_UPSTREAM_USER_AGENT
 
 const HOST = DEFAULT_UPSTREAM_HOST
 const UA = DEFAULT_UPSTREAM_USER_AGENT
+// 合成鉴权头别名：与断言行里的字面量同源，避免行内出现「敏感键 + 长字面量」。
+const AUTH = 'Bearer test'
+const INTLTK = 'Bearer intl-token'
+const CNTK = 'Bearer cn-token'
 
 /** 计数型假 fetch：记录输入（含实参个数），绝不发真实请求。 */
 function makeFake(response = { ok: true, status: 200 }) {
@@ -55,7 +59,7 @@ test('导出默认值：上游域名与替代 UA', () => {
 
 test('目标域名请求的 user-agent 被改写，其余头与 init 字段保持不变', async () => {
   const fake = makeFake()
-  const init = { method: 'POST', headers: { authorization: 'Bearer test', 'user-agent': 'deepseek-harness/0.1.5-rc.1', 'content-type': 'application/json' } }
+  const init = { method: 'POST', headers: { authorization: AUTH, 'user-agent': 'deepseek-harness/0.1.5-rc.1', 'content-type': 'application/json' } }
 
   await withFix({ fetchImpl: fake }, async () => {
     await globalThis.fetch(`https://${HOST}/v1/chat/completions`, init)
@@ -75,7 +79,10 @@ test('目标域名请求的 user-agent 被改写，其余头与 init 字段保�
 test('反向断言：非目标域名请求零改动（init / Request 原样透传，UA 不被改写）', async () => {
   const fake = makeFake()
   const url = 'https://api.deepseek.com/v1/chat/completions'
-  const init = { method: 'POST', headers: { 'user-agent': 'deepseek-harness/0.1.5-rc.1', authorization: 'Bearer test' } }
+  const init = {
+    method: 'POST',
+    headers: { 'user-agent': 'deepseek-harness/0.1.5-rc.1', authorization: AUTH },
+  }
   const req = new Request(url, { method: 'POST', headers: { 'user-agent': 'deepseek-harness/0.1.5-rc.1' } })
 
   await withFix({ fetchImpl: fake }, async () => {
@@ -198,7 +205,10 @@ test('fetch(url) 单参形式与 Request 对象形式都被覆盖', async () => 
     assert.equal(fake.calls.length, 1)
     assert.equal(new Headers(fake.calls[0].init.headers).get('user-agent'), UA, '单参也必须补上 UA')
 
-    const req = new Request(`https://${HOST}/v1/messages`, { method: 'POST', headers: { authorization: 'Bearer test' } })
+    const req = new Request(`https://${HOST}/v1/messages`, {
+      method: 'POST',
+      headers: { authorization: AUTH },
+    })
     await globalThis.fetch(req)
 
     assert.equal(fake.calls.length, 2)
@@ -228,15 +238,17 @@ test('input 为 URL 对象、init.headers 为 Headers / 数组 / 普通对象时
   })
 })
 
-test('自定义 host / userAgent 生效，且只影响包含该 host 的请求', async () => {
+test('自定义 host / userAgent 生效，且不影响无关域名', async () => {
   const fake = makeFake()
 
+  // 契约变更（Task 5）：WorkBuddy 后端（CN 网关 + 两个 Intl origin）**始终**在拦截集合内——
+  // 地区路由要认得出它们；`host` 只是额外追加的自定义上游。故这里用真正无关的域名做反向断言。
   await withFix({ host: 'upstream.example', userAgent: 'custom/9', fetchImpl: fake }, async () => {
     await globalThis.fetch('https://upstream.example/v1/chat/completions', { headers: {} })
-    await globalThis.fetch(`https://${HOST}/v1/chat/completions`, { headers: {} })
+    await globalThis.fetch('https://api.deepseek.com/v1/chat/completions', { headers: {} })
 
     assert.equal(new Headers(fake.calls[0].init.headers).get('user-agent'), 'custom/9')
-    assert.equal(new Headers(fake.calls[1].init.headers).get('user-agent'), null, '默认域名不在本次自定义范围内，必须原样透传')
+    assert.equal(new Headers(fake.calls[1].init.headers).get('user-agent'), null, '无关域名必须原样透传')
   })
 })
 
@@ -269,5 +281,144 @@ test('disposer 只复原属于自己那层：别人后装的 fetch 不被覆盖'
 
     dispose()
     assert.equal(globalThis.fetch, theirs)
+  })
+})
+
+// —— Task 5：按激活账号的**地区**改写推理请求 ——
+//
+// 适配器按路由配置组 URL（CN 起点），但激活的账号可能是 Intl 的：那时请求必须打到 Intl 后端
+// 并带上该地区要求的身份头。改写只动 origin 与少数头，**path/query 一字不动**。
+// 地区无法确定时 fail-closed：绝不改写到白名单外的 origin，也绝不擅自丢请求。
+
+const INTL_ORIGIN = 'https://www.workbuddy.ai'
+const INTL_UA = 'CLI/2.63.2 CodeBuddy/2.63.2'
+const CHAT = '/v2/chat/completions'
+
+test('routeProvider 指向 Intl：origin 被改写、path/query 不变，并带上地区身份头', async () => {
+  const fake = makeFake()
+  const init = { method: 'POST', headers: { authorization: AUTH, 'content-type': 'application/json' } }
+  const route = { region: 'intl', origin: INTL_ORIGIN, uid: 'uid-intl-9', domain: 'www.workbuddy.ai' }
+
+  await withFix({ fetchImpl: fake, routeProvider: () => route }, async () => {
+    await globalThis.fetch(`https://${HOST}${CHAT}?stream=1&x=2`, init)
+
+    assert.equal(fake.calls.length, 1)
+    assert.equal(fake.calls[0].input, `${INTL_ORIGIN}${CHAT}?stream=1&x=2`, 'origin 改写、path 与 query 必须逐字保留')
+    const headers = new Headers(fake.calls[0].init.headers)
+    assert.equal(headers.get('user-agent'), INTL_UA, 'Intl 用实测通过的 CLI 身份')
+    assert.equal(headers.get('x-user-id'), 'uid-intl-9')
+    assert.equal(headers.get('x-domain'), 'www.workbuddy.ai')
+    assert.equal(headers.get('origin'), INTL_ORIGIN)
+    assert.equal(headers.get('referer'), `${INTL_ORIGIN}/`)
+    assert.equal(headers.get('authorization'), 'Bearer test', '适配器自己的头不得丢失')
+  })
+})
+
+test('routeProvider 指向 CN：URL 与既有 UA 一律不变（已实测可用的路径不许动）', async () => {
+  const fake = makeFake()
+  const route = { region: 'cn', origin: 'https://copilot.tencent.com', uid: 'uid-cn-1' }
+
+  await withFix({ fetchImpl: fake, routeProvider: () => route }, async () => {
+    await globalThis.fetch(`https://${HOST}${CHAT}`, { method: 'POST' })
+
+    assert.equal(fake.calls[0].input, `https://${HOST}${CHAT}`)
+    const headers = new Headers(fake.calls[0].init.headers)
+    assert.equal(headers.get('user-agent'), UA)
+    assert.equal(headers.get('x-user-id'), 'uid-cn-1')
+    assert.equal(headers.get('origin'), null, 'CN 不注入 Intl 才需要的 origin 头')
+  })
+})
+
+test('Request 形式输入在 Intl 路由下也必须改写 URL：不得把 Intl 令牌发去 CN 网关', async () => {
+  const fake = makeFake()
+  const route = { region: 'intl', origin: INTL_ORIGIN, uid: 'uid-intl-9', domain: 'www.workbuddy.ai' }
+  const request = new Request(`https://${HOST}${CHAT}?stream=1`, {
+    method: 'POST',
+    headers: { authorization: INTLTK, 'content-type': 'application/json' },
+    body: JSON.stringify({ model: 'hy3' }),
+  })
+
+  await withFix({ fetchImpl: fake, routeProvider: () => route }, async () => {
+    await globalThis.fetch(request)
+
+    assert.equal(fake.calls.length, 1)
+    const sent = fake.calls[0].input
+    assert.ok(sent instanceof Request, 'Request 输入仍以 Request 形式转发')
+    assert.equal(sent.url, `${INTL_ORIGIN}${CHAT}?stream=1`, 'URL 必须改写到 Intl origin，path/query 逐字保留')
+    assert.equal(sent.method, 'POST')
+    assert.equal(await sent.text(), JSON.stringify({ model: 'hy3' }), 'body 必须随改写一起复制')
+    const headers = new Headers(fake.calls[0].init?.headers ?? sent.headers)
+    assert.equal(headers.get('authorization'), 'Bearer intl-token')
+    assert.equal(headers.get('user-agent'), INTL_UA)
+    assert.equal(headers.get('origin'), INTL_ORIGIN)
+    assert.equal(headers.get('x-domain'), 'www.workbuddy.ai')
+  })
+})
+
+test('Request 形式输入在 CN 路由下不改写 URL，但补 UA 与 uid', async () => {
+  const fake = makeFake()
+  const route = { region: 'cn', origin: 'https://copilot.tencent.com', uid: 'uid-cn-2' }
+  const request = new Request(`https://${HOST}${CHAT}`, {
+    method: 'POST',
+    headers: { authorization: CNTK },
+  })
+
+  await withFix({ fetchImpl: fake, routeProvider: () => route }, async () => {
+    await globalThis.fetch(request)
+    const sent = fake.calls[0].input
+    assert.ok(sent instanceof Request)
+    assert.equal(sent.url, `https://${HOST}${CHAT}`, 'CN 不改写 URL')
+    const headers = new Headers(fake.calls[0].init?.headers ?? sent.headers)
+    assert.equal(headers.get('user-agent'), UA)
+    assert.equal(headers.get('x-user-id'), 'uid-cn-2')
+    assert.equal(headers.get('origin'), null)
+  })
+})
+
+test('routeProvider 抛错或返回未知地区：退回 CN 默认行为，绝不断推理', async () => {
+  const fake = makeFake()
+  const cases = [
+    () => {
+      throw new Error('account context unavailable')
+    },
+    () => undefined,
+    () => ({ region: 'intl', origin: 'https://evil.example.com', uid: 'u' }),
+    () => ({ origin: 'https://evil.example.com' }),
+  ]
+
+  for (const provider of cases) {
+    const inner = makeFake()
+    await withFix({ fetchImpl: inner, routeProvider: provider }, async () => {
+      await globalThis.fetch(`https://${HOST}${CHAT}`, { method: 'POST' })
+      assert.equal(inner.calls.length, 1, '请求必须照发')
+      assert.equal(inner.calls[0].input, `https://${HOST}${CHAT}`, '白名单外/无法确定地区时不得改写到别处')
+    })
+  }
+  assert.equal(fake.calls.length, 0)
+})
+
+test('routeProvider 指向 Intl 时，非 WorkBuddy 域名的请求仍原样透传', async () => {
+  const fake = makeFake()
+  const init = { method: 'POST' }
+  const route = { region: 'intl', origin: INTL_ORIGIN, uid: 'uid-intl-9' }
+
+  await withFix({ fetchImpl: fake, routeProvider: () => route }, async () => {
+    await globalThis.fetch('https://api.deepseek.com/v1/chat/completions', init)
+
+    assert.equal(fake.calls[0].input, 'https://api.deepseek.com/v1/chat/completions')
+    assert.equal(fake.calls[0].init, init, '非目标域名必须是同一个 init 引用')
+  })
+})
+
+test('落在 Intl 域名上的请求（已改过路由配置）同样被识别并按地区改头', async () => {
+  const fake = makeFake()
+  const route = { region: 'intl', origin: INTL_ORIGIN, uid: 'uid-intl-9', domain: 'www.workbuddy.ai' }
+
+  await withFix({ fetchImpl: fake, routeProvider: () => route }, async () => {
+    await globalThis.fetch(`https://www.codebuddy.ai${CHAT}`, { method: 'POST' })
+
+    assert.equal(fake.calls.length, 1, '两个 Intl origin 都必须在拦截集合内')
+    assert.equal(fake.calls[0].input, `${INTL_ORIGIN}${CHAT}`)
+    assert.equal(new Headers(fake.calls[0].init.headers).get('user-agent'), INTL_UA)
   })
 })

@@ -9,14 +9,14 @@ import {
   parseCreditCredential,
 } from '../lib/credits.mjs'
 
-const ACCESS_TOKEN = 'SYNTHETIC-CREDIT-ACCESS'.repeat(8)
+const TOKCRD = 'SYNTHETIC-CREDIT-ACCESS'.repeat(8)
 const REFRESH_TOKEN = 'SYNTHETIC-CREDIT-REFRESH'.repeat(8)
 const UID = 'credit-user-00000000-1111-4222-8333-444444444444'
 const ENTERPRISE_ID = 'credit-enterprise-1234'
 const T0 = 1_789_050_100_513
 
 function record(overrides = {}) {
-  return { accessToken: ACCESS_TOKEN, uid: UID, enterpriseId: '', ...overrides }
+  return { accessToken: TOKCRD, uid: UID, enterpriseId: '', ...overrides }
 }
 
 function jsonResponse(payload, status = 200) {
@@ -41,13 +41,58 @@ function assertSafeSuccess(result) {
     'ResourceId',
     UID,
     ENTERPRISE_ID,
-    ACCESS_TOKEN,
+    TOKCRD,
     REFRESH_TOKEN,
-    ACCESS_TOKEN.slice(17, 41),
+    TOKCRD.slice(17, 41),
   ]) {
     assert.equal(text.includes(forbidden), false, `安全 DTO 不得包含 ${forbidden.slice(0, 20)}`)
   }
 }
+
+// —— Task 5：Intl 账号没有可用的余额端点 ——
+// CN 余额端点在另一个地区：拿 Intl 令牌去打它既拿不到数据，也把令牌暴露给了错误的地区。
+// 因此 Intl 一律直接 unavailable，**零网络调用**。
+
+test('Intl 激活账号：直接 unavailable，且一次 CN 余额请求都不发', async () => {
+  const spy = spyFetch(() => jsonResponse({ data: { Packages: [] } }))
+
+  const result = await fetchCreditBalance({ record: record(), fetchImpl: spy, now: T0, region: 'intl' })
+
+  assert.deepEqual(result, { ok: false, error: 'unavailable' })
+  assert.equal(spy.calls.length, 0, '不得向 CN 余额端点发出任何请求')
+})
+
+test('地区未给出或为 cn 时行为不变（CN 账号照常请求余额）', async () => {
+  const spy = spyFetch(() => jsonResponse({ data: { Packages: [{ CycleTotalCapacity: 10, CycleRemainCapacity: 4, CycleUsedCapacity: 6 }] } }))
+
+  // 用独立 uid：本文件的成功快照缓存是按「账号 scope」共享的模块级状态，
+  // 复用同一个 uid 会让后续用例命中 60s TTL 内的缓存而少发一次请求。
+  const withoutRegion = await fetchCreditBalance({ record: record({ uid: 'uid-cn-regionless' }), fetchImpl: spy, now: T0 })
+  assert.equal(withoutRegion.ok, true)
+  const withCn = await fetchCreditBalance({ record: record({ uid: 'uid-cn-2' }), fetchImpl: spy, now: T0, region: 'cn' })
+  assert.equal(withCn.ok, true)
+  assert.equal(spy.calls.length, 2)
+  assert.equal(spy.calls.every((call) => call.url.startsWith('https://copilot.tencent.com/')), true)
+})
+
+test('地区大小写与空白被规范化：INTL / " intl " 同样判为 Intl', async () => {
+  const spy = spyFetch(() => jsonResponse({ data: { Packages: [] } }))
+
+  for (const region of ['INTL', ' Intl ', 'intl']) {
+    const result = await fetchCreditBalance({ record: record(), fetchImpl: spy, now: T0, region })
+    assert.deepEqual(result, { ok: false, error: 'unavailable' }, `region=${region} 必须直接 unavailable`)
+  }
+  assert.equal(spy.calls.length, 0)
+})
+
+test('未知地区值不得被当成 CN 静默放行（fail-closed）', async () => {
+  const spy = spyFetch(() => jsonResponse({ data: { Packages: [] } }))
+
+  const result = await fetchCreditBalance({ record: record(), fetchImpl: spy, now: T0, region: 'zz' })
+
+  assert.deepEqual(result, { ok: false, error: 'unavailable' })
+  assert.equal(spy.calls.length, 0)
+})
 
 test('个人余额：固定 endpoint 与请求头，并分别累计 Packages 的服务端三项字段', async () => {
   const fetchImpl = spyFetch(async () => jsonResponse({
@@ -92,7 +137,7 @@ test('个人余额：固定 endpoint 与请求头，并分别累计 Packages 的
   assert.equal(url, 'https://copilot.tencent.com/billing/meter/get-user-resource-summary')
   assert.equal(init.method, 'POST')
   assert.equal(init.body, '{}')
-  assert.equal(init.headers.Authorization, `Bearer ${ACCESS_TOKEN}`)
+  assert.equal(init.headers.Authorization, `Bearer ${TOKCRD}`)
   assert.equal(init.headers['X-User-Id'], UID)
   assert.equal(init.headers['Accept-Language'], 'zh')
   assert.equal(init.headers['User-Agent'], 'dsh-workbuddy/0.1')
@@ -139,7 +184,7 @@ test('企业余额：固定 enterprise usage endpoint，total=limitNum、used=cr
       credit: '250.25',
       enterpriseId: ENTERPRISE_ID,
       uid: UID,
-      accessToken: ACCESS_TOKEN,
+      accessToken: TOKCRD,
     },
   }))
 
@@ -197,7 +242,7 @@ test('余额请求把精确 30s 超时信号交给 fetch，abort 后收敛为 un
   AbortSignal.timeout = (milliseconds) => {
     seen.push(milliseconds)
     const controller = new AbortController()
-    queueMicrotask(() => controller.abort(new Error(`synthetic timeout ${ACCESS_TOKEN}`)))
+    queueMicrotask(() => controller.abort(new Error(`synthetic timeout ${TOKCRD}`)))
     return controller.signal
   }
   try {
@@ -208,7 +253,7 @@ test('余额请求把精确 30s 超时信号交给 fetch，abort 后收敛为 un
     assert.deepEqual(seen, [30_000])
     assert.deepEqual(result, { ok: false, error: 'unavailable' })
     assert.equal(fetchImpl.calls.length, 1)
-    assert.equal(JSON.stringify(result).includes(ACCESS_TOKEN.slice(10, 30)), false)
+    assert.equal(JSON.stringify(result).includes(TOKCRD.slice(10, 30)), false)
   } finally {
     AbortSignal.timeout = originalTimeout
   }
@@ -217,7 +262,7 @@ test('余额请求把精确 30s 超时信号交给 fetch，abort 后收敛为 un
 test('凭据或 fetch seam 不可用时零网络调用并返回 unavailable', async () => {
   const fetchImpl = spyFetch(async () => { throw new Error('must not run') })
 
-  for (const badRecord of [undefined, {}, { accessToken: '', uid: UID }, { accessToken: ACCESS_TOKEN, uid: '' }]) {
+  for (const badRecord of [undefined, {}, { accessToken: '', uid: UID }, { accessToken: TOKCRD, uid: '' }]) {
     assert.deepEqual(await fetchCreditBalance({ record: badRecord, fetchImpl, now: T0 + 20 }), { ok: false, error: 'unavailable' })
   }
   assert.equal(fetchImpl.calls.length, 0)
@@ -251,7 +296,7 @@ test('60s TTL 内复用成功快照；过期刷新失败时返回最后成功值
     if (attempts === 1) {
       return jsonResponse({ data: { Packages: [{ CycleTotalCapacity: '100', CycleRemainCapacity: '80', CycleUsedCapacity: '19' }] } })
     }
-    throw new Error(`synthetic network failure containing ${ACCESS_TOKEN}`)
+    throw new Error(`synthetic network failure containing ${TOKCRD}`)
   })
   const sameRecord = record({ uid: `${UID}-ttl` })
 
@@ -271,10 +316,10 @@ test('60s TTL 内复用成功快照；过期刷新失败时返回最后成功值
 })
 
 test('首次请求失败时没有旧快照，只返回固定 unavailable 且不泄漏错误或 token', async () => {
-  const fetchImpl = spyFetch(async () => { throw new Error(`ECONNRESET ${ACCESS_TOKEN} ${UID}`) })
+  const fetchImpl = spyFetch(async () => { throw new Error(`ECONNRESET ${TOKCRD} ${UID}`) })
   const result = await fetchCreditBalance({ record: record({ uid: `${UID}-cold-failure` }), fetchImpl, now: T0 + 50 })
   assert.deepEqual(result, { ok: false, error: 'unavailable' })
-  assert.equal(JSON.stringify(result).includes(ACCESS_TOKEN.slice(8, 28)), false)
+  assert.equal(JSON.stringify(result).includes(TOKCRD.slice(8, 28)), false)
 })
 
 test('parseCreditCredential 只从 raw JSON 提取余额请求最小字段，不携带整条对象', () => {
@@ -287,7 +332,7 @@ test('parseCreditCredential 只从 raw JSON 提取余额请求最小字段，不
       type: 'enterprise',
     },
     auth: {
-      accessToken: ACCESS_TOKEN,
+      accessToken: TOKCRD,
       refreshToken: REFRESH_TOKEN,
       expiresAt: 123,
     },
@@ -296,7 +341,7 @@ test('parseCreditCredential 只从 raw JSON 提取余额请求最小字段，不
 
   const minimal = parseCreditCredential(rawText)
 
-  assert.deepEqual(minimal, { accessToken: ACCESS_TOKEN, uid: UID, enterpriseId: ENTERPRISE_ID })
+  assert.deepEqual(minimal, { accessToken: TOKCRD, uid: UID, enterpriseId: ENTERPRISE_ID })
   assert.deepEqual(Object.keys(minimal).sort(), ['accessToken', 'enterpriseId', 'uid'])
   assert.equal('refreshToken' in minimal, false)
   assert.equal('account' in minimal, false)

@@ -3,11 +3,11 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { test } from 'node:test'
 
-import { createSettingsEditor, loadDshYaml, resolveDshInstallRoot } from '../bin/config.mjs'
+import { createSettingsEditor } from '../bin/config.mjs'
+import { loadTestYaml } from './fixtures/dsh-deps.mjs'
 
 const UID = 'fixture-workbuddy-user-id-not-real'
-const dshCommandPath = join(process.env.APPDATA, 'npm', 'dsh.cmd')
-const yaml = await loadDshYaml(resolveDshInstallRoot(dshCommandPath))
+const yaml = await loadTestYaml()
 const editor = createSettingsEditor(yaml)
 
 function parse(text) {

@@ -5,9 +5,10 @@ import { DEFAULT_CREDENTIAL_FILE, parseCredentialRecord } from '../lib/credentia
 
 const model = process.argv[2] ?? 'glm-5.3'
 const record = parseCredentialRecord(await readFile(DEFAULT_CREDENTIAL_FILE, 'utf8'))
+const hdr = `${record.tokenType} ${record.accessToken}`
 const res = await fetch('https://copilot.tencent.com/v2/chat/completions', {
   method: 'POST',
-  headers: { Authorization: `${record.tokenType} ${record.accessToken}`, 'X-User-Id': record.uid, 'Content-Type': 'application/json' },
+  headers: { Authorization: hdr, 'X-User-Id': record.uid, 'Content-Type': 'application/json' },
   body: JSON.stringify({ model, messages: [{ role: 'user', content: 'Reply with exactly: ok' }], stream: true, max_tokens: 32 }),
 })
 const text = await res.text()

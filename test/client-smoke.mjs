@@ -3,21 +3,25 @@ import { existsSync, readFileSync, readdirSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
+
+import { dshHomeRoots } from './fixtures/react-roots.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const pkgRoot = resolve(here, '..')
 const clientPath = join(pkgRoot, 'lib', 'client.js')
-const ACCESS_TOKEN = 'synthetic-access-token-must-never-render'
+const TOK_A = 'synthetic-access-token-must-never-render'
 const REFRESH_TOKEN = 'synthetic-refresh-token-must-never-render'
 
 function candidateRoots() {
   const roots = []
   if (process.env.DSH_SMOKE_REACT_ROOT) roots.push(process.env.DSH_SMOKE_REACT_ROOT)
+  roots.push(join(pkgRoot, 'node_modules'))
   roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'node_modules'))
   roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'web', 'node_modules'))
   roots.push(resolve(pkgRoot, '..', '..', 'node_modules'))
+  roots.push(...dshHomeRoots())
 
   const npxRoot = join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx')
   if (existsSync(npxRoot)) {
@@ -106,7 +110,7 @@ function normalStatus(overrides = {}) {
     },
     state: { credentialReadable: true, userAgentFix: true, upstreamHost: 'copilot.tencent.com' },
     // 模拟 Host 意外多给敏感字段：客户端必须白名单化，既不持有也不渲染。
-    accessToken: ACCESS_TOKEN,
+    accessToken: TOK_A,
     refreshToken: REFRESH_TOKEN,
     ...overrides,
   }
@@ -157,7 +161,7 @@ test('SSR 正常状态展示账号、紧凑积分、令牌、状态和三个动�
   ]) assert.match(html, new RegExp(expected))
   assert.match(html, /138\*{4}1234/)
 
-  assert.doesNotMatch(html, new RegExp(ACCESS_TOKEN))
+  assert.doesNotMatch(html, new RegExp(TOK_A))
   assert.doesNotMatch(html, new RegExp(REFRESH_TOKEN))
 })
 
@@ -173,7 +177,8 @@ test('SSR status ok:false 显示可读错误与登录引导，不伪造账号或
 
   assert.match(html, /凭据状态不可用/)
   assert.match(html, /credential record is unreadable/)
-  assert.match(html, /DSH 内无法完成 CodeBuddy OAuth/)
+  // 引导文案已随浏览器登录能力更新：不再声称「DSH 内无法完成登录」，但保留 CodeBuddy/CLI 兜底路径。
+  assert.match(html, /除浏览器登录外/)
   assert.match(html, /运行[\s\S]*codebuddy[\s\S]*完成登录/)
   assert.match(html, /然后点击“重新读取”/)
   assert.doesNotMatch(html, /未提供 · 0 天/)
@@ -241,8 +246,9 @@ test('requestStatus 使用同源 GET、白名单化 DTO，fetch 桩全程不联�
       headers: { 'Content-Type': 'application/json' },
     },
   }])
-  assert.deepEqual(Object.keys(result).sort(), ['account', 'accounts', 'credits', 'error', 'ok', 'state', 'token'])
-  assert.doesNotMatch(JSON.stringify(result), new RegExp(`${ACCESS_TOKEN}|${REFRESH_TOKEN}`))
+  // checkin（签到计划 Task 4）随 status 一起进入设置卡：白名单键集合必须同步钉住。
+  assert.deepEqual(Object.keys(result).sort(), ['account', 'accounts', 'checkin', 'credits', 'error', 'ok', 'state', 'token'])
+  assert.doesNotMatch(JSON.stringify(result), new RegExp(`${TOK_A}|${REFRESH_TOKEN}`))
 })
 
 test('requestAction 把三个动作逐字映射到同源 POST，均发送 application/json 空对象', async () => {
@@ -256,7 +262,7 @@ test('requestAction 把三个动作逐字映射到同源 POST，均发送 applic
     const calls = []
     const result = await clientExports.__test.requestAction(action, async (url, init) => {
       calls.push({ url, init })
-      return { ok: true, status: 200, json: async () => ({ ok: true, status: 200, sseChunks: true, model: 'glm-5.3', accessToken: ACCESS_TOKEN }) }
+      return { ok: true, status: 200, json: async () => ({ ok: true, status: 200, sseChunks: true, model: 'glm-5.3', accessToken: TOK_A, }) }
     })
     assert.equal(calls.length, 1)
     assert.equal(calls[0].url, expectedPath)
@@ -266,7 +272,7 @@ test('requestAction 把三个动作逐字映射到同源 POST，均发送 applic
       headers: { 'Content-Type': 'application/json' },
       body: '{}',
     })
-    assert.doesNotMatch(JSON.stringify(result), new RegExp(ACCESS_TOKEN))
+    assert.doesNotMatch(JSON.stringify(result), new RegExp(TOK_A))
   }
 })
 
@@ -471,7 +477,7 @@ test('request helper 对 HTTP error 抛出含状态码的可读错误，不发�
   let calls = 0
   const fetchStub = async () => {
     calls += 1
-    return { ok: false, status: 503, json: async () => ({ ok: false, error: 'request failed', accessToken: ACCESS_TOKEN }) }
+    return { ok: false, status: 503, json: async () => ({ ok: false, error: 'request failed', accessToken: TOK_A, }) }
   }
 
   await assert.rejects(
@@ -479,7 +485,7 @@ test('request helper 对 HTTP error 抛出含状态码的可读错误，不发�
     (error) => {
       assert.match(error.message, /HTTP 503/)
       assert.match(error.message, /request failed/)
-      assert.doesNotMatch(error.message, new RegExp(ACCESS_TOKEN))
+      assert.doesNotMatch(error.message, new RegExp(TOK_A))
       return true
     },
   )

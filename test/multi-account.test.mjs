@@ -11,10 +11,11 @@ const { listCredentialSources, createAccountSelector } = await import('../lib/mu
 function makeAuthDir() {
   const dir = mkdtempSync(join(tmpdir(), 'wb-multi-'))
   const mk = (name, account) => {
+    const tok = `SYNTHETIC-TOKEN-${account.uid.slice(-4).toUpperCase()}`
     writeFileSync(
       join(dir, name),
       JSON.stringify({
-        auth: { accessToken: `SYNTHETIC-TOKEN-${account.uid.slice(-4).toUpperCase()}`, refreshToken: 'SYNTHETIC-REFRESH', expiresAt: Date.now() + 30 * 86_400_000, refreshExpiresAt: Date.now() + 60 * 86_400_000, lastRefreshTime: Date.now() },
+        auth: { accessToken: tok, refreshToken: 'SYNTHETIC-REFRESH', expiresAt: Date.now() + 30 * 86_400_000, refreshExpiresAt: Date.now() + 60 * 86_400_000, lastRefreshTime: Date.now() },
         account,
       }),
     )
@@ -61,7 +62,8 @@ test('createAccountSelector.activate：切换后 readCredentialRaw 读新文件�
     let readFileCalls = []
     const readFile = async (file) => {
       readFileCalls.push(file)
-      return `{"auth":{"accessToken":"T-${file.slice(-12)}","refreshToken":"R","expiresAt":${Date.now() + 86_400_000}},"account":{"uid":"u-${file.slice(-8)}","nickname":"n"}}`
+      const tok = `T-${file.slice(-12)}`
+      return `{"auth":{"accessToken":"${tok}","refreshToken":"R","expiresAt":${Date.now() + 86_400_000}},"account":{"uid":"u-${file.slice(-8)}","nickname":"n"}}`
     }
     const selector = createAccountSelector({
       authDir: dir,

@@ -40,6 +40,23 @@ test('未启用多账号时 accounts.enabled=false 且不带列表', () => {
   assert.equal(status.accounts.sources.length, 0)
 })
 
+// 设置卡的「已加密 / 已失效」标注靠这两个布尔字段；它们曾经在白名单里被吃掉，
+// 导致后端算出了标注、前端永远显示不出来。
+test('encrypted / stale 两个标注字段穿过白名单，且不夹带凭据', async () => {
+  const dir = makeAuthDir()
+  try {
+    const { listCredentialSources } = await import('../lib/multi-account.mjs')
+    const rawText = JSON.stringify({ auth: { accessToken: TOKEN, refreshToken: 'r', expiresAt: Date.now() + 30 * 86_400_000 }, account: { uid: 'u', nickname: '甲' } })
+    const sources = listCredentialSources(dir).map((source, index) => ({ ...source, encrypted: index === 0, stale: index === 1 }))
+    const status = buildStatus({ rawText: withAccounts(rawText, { enabled: true, activeId: sources[0].id, sources }), now: Date.now() })
+    assert.deepEqual(status.accounts.sources.map((source) => source.encrypted), [true, false])
+    assert.deepEqual(status.accounts.sources.map((source) => source.stale), [false, true])
+    assert.ok(!JSON.stringify(status).includes(TOKEN))
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+})
+
 test('带账号列表时 Host 脏数据（注入 token 的 source 字段）被白名单丢弃', async () => {
   const dir = makeAuthDir()
   try {

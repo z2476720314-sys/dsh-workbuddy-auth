@@ -289,29 +289,59 @@ export async function replaceSettingsAtomically(settingsPath, content, randomId)
   return replaceTextAtomically(settingsPath, content, randomId)
 }
 
-export async function loadDshYaml(dshInstallRoot) {
-  const yamlCandidates = [
-    join(dshInstallRoot, 'node_modules', 'yaml', 'dist', 'index.js'),
-    join(dshInstallRoot, 'node_modules', 'yaml', 'dist', 'index.mjs'),
-  ]
+// A DSH installation is not always an npm-style root: the desktop app ships its
+// dependencies inside the app bundle while the profile directory keeps its own
+// copy. Searching the profile roots as well keeps validation working for both.
+// Each returned root is expected to hold the dependency under `node_modules`.
+export function profileDependencyRoots(dshHome, profile) {
+  const roots = []
+  if (typeof dshHome !== 'string' || dshHome === '') return roots
+  roots.push(dshHome)
+  roots.push(join(dshHome, 'profiles'))
+  if (typeof profile === 'string' && profile !== '') roots.push(join(dshHome, 'profiles', profile))
+  return roots
+}
+
+function dependencyRoots(dshInstallRoot, extraRoots) {
+  const roots = []
+  for (const root of [dshInstallRoot, ...extraRoots]) {
+    if (typeof root === 'string' && root !== '' && !roots.includes(root)) roots.push(root)
+  }
+  return roots
+}
+
+async function importFirstModule(paths) {
   let lastError
-  for (const yamlPath of yamlCandidates) {
+  for (const modulePath of paths) {
     try {
-      return await import(pathToFileURL(yamlPath).href)
+      return await import(pathToFileURL(modulePath).href)
     } catch (error) {
       lastError = error
     }
   }
-  throw lastError ?? new Error('Installed DSH YAML dependency is unavailable.')
+  throw lastError ?? new Error('Installed DSH dependency is unavailable.')
 }
 
-export async function createDshValidator(dshInstallRoot, yamlOverride) {
-  const piPath = join(dshInstallRoot, 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai', 'lib', 'index.js')
+export async function loadDshYaml(dshInstallRoot, extraRoots = []) {
+  const yamlCandidates = dependencyRoots(dshInstallRoot, extraRoots).flatMap((root) => [
+    join(root, 'node_modules', 'yaml', 'dist', 'index.js'),
+    join(root, 'node_modules', 'yaml', 'dist', 'index.mjs'),
+  ])
+  try {
+    return await importFirstModule(yamlCandidates)
+  } catch (error) {
+    if (yamlCandidates.length === 0) throw new Error('Installed DSH YAML dependency is unavailable.')
+    throw error
+  }
+}
+
+export async function createDshValidator(dshInstallRoot, yamlOverride, extraRoots = []) {
+  const piCandidates = dependencyRoots(dshInstallRoot, extraRoots).map((root) => join(root, 'node_modules', '@deepseek-ai', 'dsh-llm-pi-ai', 'lib', 'index.js'))
   let yaml
   let pi
   try {
-    yaml = yamlOverride ?? await loadDshYaml(dshInstallRoot)
-    pi = await import(pathToFileURL(piPath).href)
+    yaml = yamlOverride ?? await loadDshYaml(dshInstallRoot, extraRoots)
+    pi = await importFirstModule(piCandidates)
   } catch {
     throw new Error('Installed DSH validation dependencies are unavailable.')
   }

@@ -27,17 +27,30 @@ async function pathExists(path) {
   }
 }
 
-test('Windows command lookup resolves dsh.cmd specifically', async () => {
-  const commandPath = await defaultDshCommandPath({ platform: 'win32', env: process.env })
+test('Windows command lookup resolves dsh.cmd specifically', async (t) => {
+  let commandPath
+  try {
+    commandPath = await defaultDshCommandPath({ platform: 'win32', env: process.env })
+  } catch {
+    t.skip('dsh.cmd is not available on PATH in this environment')
+    return
+  }
   assert.match(commandPath, /dsh\.cmd$/iu)
 })
 
-test('Windows runner invokes the installed dsh.cmd --version successfully', async () => {
-  const result = await defaultRunDsh(['--version'], {
-    platform: 'win32',
-    candidates: ['dsh.cmd'],
-    env: process.env,
-  })
+test('Windows runner invokes the installed dsh.cmd --version successfully', async (t) => {
+  let result
+  try {
+    result = await defaultRunDsh(['--version'], {
+      platform: 'win32',
+      candidates: ['dsh.cmd'],
+      env: process.env,
+    })
+  } catch (error) {
+    if (error?.code !== 'ENOENT') throw error
+    t.skip('dsh.cmd is not available on PATH in this environment')
+    return
+  }
 
   assert.equal(result.code, 0)
   assert.match(result.stdout, /^\d+\.\d+\.\d+/u)
