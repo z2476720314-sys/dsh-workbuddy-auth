@@ -3,6 +3,38 @@
 本文件记录 dsh-workbuddy-auth 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.2] - 2026-10-13
+
+### 修复
+
+- **登录失败只有一句「登录初始化或轮询失败」，看不出失败在哪一步**：失败态与等待态的登录 DTO 新增三个
+  **脱敏诊断**字段——`reason`（七类原因：`network` / `http` / `upstream` / `region` / `payload` /
+  `store` / `timeout`）、`detail`（该次失败的已知事实：阶段、域、HTTP 状态码、上游业务码）、
+  `trace`（最近 24 次上游交互的轨迹）。展示值一律查固定白名单（`lib/diagnostic-display.mjs`，
+  服务层 / 路由层 / 前端三处投影同源）：只有本插件自己写下的阶段字面量
+  （`state` / `token` / `credential` / `store`）、已知域、有证据的业务码（`0` / `401` / `11128` /
+  `11217` / `12403`）与 100–599 的 HTTP 状态码会进入文案，其余一律丢字段并显示「未知」——上游可控的
+  字符串（手机号、伪造的域样串）不会成为回显通道；令牌、`state`、原始响应体与本地路径始终不进 DTO。
+  成功态 DTO 形状不变，仍不带任何上游细节。设置卡的失败文案随之按原因分档（地区拒绝会点名被拒的域、
+  上游拒绝会给出业务码），兜底文案保持原样（`test/login-diagnostics.test.mjs`、
+  `test/client-login-hint.test.mjs`、`test/diagnostic-display.test.mjs`）。
+- **轮询期间的一次网络抖动会把整条登录判死**：授权是「浏览器里人工操作 + 约 1.5 秒轮询」的组合，
+  之前任何一次瞬时失败（连接重置 / 网关 5xx / HTTP 408 / 425 / 429）都直接终态失败，用户正在输
+  验证码时就会看到「登录失败」。现在连续瞬时失败在 5 次以内保持 `pending` 继续轮询（每次都记进诊断
+  轨迹），达到上限或 300 秒总时限才终态失败；`complete` 之后到达的迟到结果仍不改写终态。
+- **余额查询失败一律显示「上游未提供余额」**：余额失败不再只有一个 `unavailable`，而是按失败阶段
+  收敛为四个稳定值——`auth-rejected`（401/403 凭据被上游拒绝）、`request-failed`（网络 / 超时 /
+  其它非 2xx）、`upstream-invalid`（2xx 但报文不可解析）、`unavailable`（地区不支持或凭据缺失，
+  一次请求都不发）；同一个值域在 `lib/credits.mjs` → `lib/status.mjs` → `lib/routes.mjs` → 设置卡
+  四道投影一致收敛。设置卡把前三类渲染成不同文案（重新登录该账号 / 稍后重试 / 反馈），不再把认证
+  失败说成「上游没有余额」。
+
+### 变更
+
+- 诊断展示规则抽到 `lib/diagnostic-display.mjs`，服务层与路由层 import 同一份；前端受宿主经典脚本
+  加载器限制只能保留同规则副本，两份的一致性由 `test/diagnostic-display.test.mjs` 与服务层规格测试
+  锁定。
+
 ## [0.3.1] - 2026-10-13
 
 ### 修复

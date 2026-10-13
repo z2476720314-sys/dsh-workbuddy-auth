@@ -354,3 +354,19 @@ test('buildStatus 无参调用不抛错（route 层依赖它必须永远返回�
   assert.equal(typeof s.error, 'string')
   assert.equal(s.state.credentialReadable, false)
 })
+
+test('attachCredits 失败分支按白名单透传分类枚举，未知值收敛为 unavailable', async () => {
+  const { attachCredits } = await import('../lib/status.mjs')
+  // 已知枚举必须原样到达 DTO（客户端才能区分「重新登录」与「稍后重试」）
+  for (const code of ['auth-rejected', 'request-failed', 'upstream-invalid']) {
+    const dto = attachCredits({}, { ok: false, error: code })
+    assert.deepEqual(dto.credits, { ok: false, error: code }, `error=${code}`)
+  }
+  // 未知 / 自由文本一律收敛为 unavailable：错误枚举是脱敏边界，不透传任意字符串
+  for (const bad of ['weird', undefined]) {
+    const dto = attachCredits({}, { ok: false, error: bad })
+    assert.deepEqual(dto.credits, { ok: false, error: 'unavailable' })
+  }
+  const fallingBack = attachCredits({}, { ok: false })
+  assert.deepEqual(fallingBack.credits, { ok: false, error: 'unavailable' })
+})

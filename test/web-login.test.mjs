@@ -536,3 +536,213 @@ test('状态接口只读本地状态：idle 时也返回 DTO', () => {
   const service = createWebLoginService({ store, fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{}' }) })
   assert.deepEqual(service.status(), { status: 'idle' })
 })
+
+// 诊断面（2026-10-13）：失败必须能区分 network / http / upstream / region 四类，
+// 并只带脱敏字段（host、domain、HTTP 状态、上游业务码）。历史问题正是这里：
+// WORKBUDDY_LOGIN_POLL_FAILED 只有一句「登录初始化或轮询失败。」，
+// 看不出是「连不上」「网关 5xx」「上游业务拒绝」还是「地区白名单漏了某个域」。
+test('失败诊断：连不上游（network）带 host 与错误名，文案点名网络且不泄漏令牌与 state', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const boom = () => {
+    const error = new Error('connect ECONNREFUSED 127.0.0.1:443')
+    error.name = 'TypeError'
+    throw error
+  }
+  const { fetchImpl } = makeFetch([STATE_OK, boom])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.status, 'error')
+  assert.equal(done.error, LOGIN_ERRORS.poll)
+  assert.equal(done.reason, 'network')
+  assert.equal(done.detail.reason, 'network')
+  assert.equal(done.detail.host, 'copilot.tencent.com')
+  assert.equal(done.detail.error, 'TypeError')
+  assert.equal(done.progress, '轮询授权结果时无法连接上游，请检查网络或代理后重试。')
+  assert.equal(done.trace[0].step, 'state', '轨迹从拿到 state 开始')
+  assert.equal(done.trace[0].code, 0)
+  assert.equal(done.trace.at(-1).step, 'token')
+  assert.equal(done.trace.at(-1).reason, 'network')
+  assert.ok(
+    done.trace.filter((event) => event.step === 'token').length >= 2,
+    '瞬时网络失败会重试，轨迹必须逐次记下（否则无法复验抖动几次才终态）',
+  )
+  assertNoToken(JSON.stringify(done), 'network 失败诊断')
+  assert.equal(JSON.stringify(done).includes('state-1'), false, 'state 值不得回显')
+  assert.equal(JSON.stringify(done).includes('ECONNREFUSED'), false, '上游错误原文不得回显')
+  assert.deepEqual(await store.list(), [])
+})
+
+test('失败诊断：轮询 HTTP 503（http）带状态码，文案点名 HTTP', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const { fetchImpl } = makeFetch([STATE_OK, { status: 503, raw: '<html>503 Service Unavailable</html>' }])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.error, LOGIN_ERRORS.poll)
+  assert.equal(done.reason, 'http')
+  assert.equal(done.detail.httpStatus, 503)
+  assert.equal(done.detail.host, 'copilot.tencent.com')
+  assert.equal(done.progress, '轮询授权结果时上游返回 HTTP 503。')
+  assert.equal(JSON.stringify(done).includes('Service Unavailable'), false, '响应体不得回显')
+})
+
+test('失败诊断：上游业务码（upstream）带 code，文案点名业务码', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const { fetchImpl } = makeFetch([STATE_OK, { json: { code: 11128, msg: 'invalid user agent' } }])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.error, LOGIN_ERRORS.poll)
+  assert.equal(done.reason, 'upstream')
+  assert.equal(done.detail.code, 11128)
+  assert.equal(done.progress, '上游拒绝本次授权（业务错误码 11128），请重新登录。')
+  assert.equal(JSON.stringify(done).includes('invalid user agent'), false, '上游文案不得回显')
+})
+
+test('失败诊断：未知域既不进 DTO 也不进文案，只显示占位词「未知域」', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const alien = {
+    json: { code: 0, data: { auth: { accessToken: TOKSYN, refreshToken: REFRESH_TOKEN, expiresIn: 60, domain: 'www.example-alien.cn' } } },
+  }
+  const { fetchImpl } = makeFetch([STATE_OK, alien])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.status, 'error')
+  assert.equal(done.error, LOGIN_ERRORS.poll)
+  assert.equal(done.reason, 'region')
+  assert.equal(done.detail.reason, 'region')
+  // 复审 2026-10-13：domain 是上游可控字段。旧实现在文案里直接插原始值，一个
+  // `C:\…\secret.json?state=…&token=…` 就整串漏给用户；现在只认已知域集合内的值。
+  assert.equal(Object.keys(done.detail).includes('domain'), false, '未知域不得进 DTO')
+  assert.ok(done.progress.includes('未知域'), `文案用占位词：${done.progress}`)
+  assert.equal(done.progress.includes('www.example-alien.cn'), false, '不得回显未知域')
+  assertNoToken(JSON.stringify(done), 'region 失败诊断')
+  assert.deepEqual(await store.list(), [], '地区不符绝不入库')
+})
+
+test('失败诊断：跨地区错配时仍点名域本身（域在已知集合内，只是不属于本次地区）', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const intlDomain = {
+    json: { code: 0, data: { auth: { accessToken: TOKSYN, refreshToken: REFRESH_TOKEN, expiresIn: 60, domain: 'www.workbuddy.ai' } } },
+  }
+  const { fetchImpl } = makeFetch([STATE_OK, intlDomain])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.reason, 'region')
+  assert.equal(done.detail.domain, 'www.workbuddy.ai')
+  assert.ok(done.progress.includes('www.workbuddy.ai'), `已知域要点名：${done.progress}`)
+  assertNoToken(JSON.stringify(done), '跨地区失败诊断')
+  assert.deepEqual(await store.list(), [], '跨地区令牌绝不入库')
+})
+
+test('失败诊断：夹带路径 / query / 令牌的域串整段丢弃', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const dirty = `C:\\private\\secret-token.json?state=state-1&token=${TOKSYN}`
+  const { fetchImpl } = makeFetch([
+    STATE_OK,
+    { json: { code: 0, data: { auth: { accessToken: TOKSYN, refreshToken: REFRESH_TOKEN, expiresIn: 60, domain: dirty } } } },
+  ])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.reason, 'region')
+  assert.equal(Object.keys(done.detail).includes('domain'), false)
+  const rendered = JSON.stringify(done)
+  assert.equal(rendered.includes('secret-token.json'), false, '不得回显本地路径')
+  assert.equal(rendered.includes('state-1'), false, '不得回显 state')
+  assert.equal(rendered.includes(TOKSYN), false, '不得回显令牌')
+  assert.ok(done.progress.includes('未知域'))
+})
+
+test('失败诊断：上游把手机号塞进业务码（数字串）时丢弃字段，文案只写「未知」', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const { fetchImpl } = makeFetch([STATE_OK, { json: { code: '13800138000', msg: 'weird' } }])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.status, 'error')
+  assert.equal(done.reason, 'upstream')
+  assert.equal(Object.keys(done.detail).includes('code'), false, '无代码证据的业务码不得进 DTO')
+  assert.equal(JSON.stringify(done).includes('13800138000'), false, '不得回显手机号')
+  assert.ok(done.progress.includes('未知'), `文案用占位词：${done.progress}`)
+})
+
+test('失败诊断：异常名不在已知错误类型枚举内时丢弃 error 字段（标识符样与数字样都算）', async () => {
+  for (const badName of ['TOKENCANARY', 13800138000]) {
+    const clock = makeClock()
+    const { store } = makeStore()
+    const boom = () => {
+      const error = new Error('upstream failed')
+      error.name = badName
+      return Promise.reject(error)
+    }
+    const { fetchImpl } = makeFetch([STATE_OK, boom])
+    const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+    await service.start('cn')
+    const done = await settle(service, clock)
+
+    assert.equal(done.reason, 'network')
+    assert.equal(Object.keys(done.detail).includes('error'), false, `未知错误名（${badName}）不得进 DTO`)
+    assert.equal(JSON.stringify(done).includes(String(badName)), false, `canary ${badName} 不得回显`)
+  }
+})
+
+test('诊断的形状闸门：路径样错误名被整段丢弃，绝不截断保留', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const boom = () => {
+    const error = new Error('open failed')
+    error.name = 'C:\\private\\secret-tokens.json'
+    throw error
+  }
+  const { fetchImpl } = makeFetch([STATE_OK, boom])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.reason, 'network', '原因分类不依赖错误名，仍应是 network')
+  assert.equal(Object.keys(done.detail).includes('error'), false, '路径样错误名必须被形状闸门丢弃')
+  assert.equal(JSON.stringify(done).includes('secret-tokens.json'), false, '不得回显路径片段')
+})
+
+test('成功流程不携带诊断字段：成功态 DTO 形状与 0.3.1 保持一致', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const { fetchImpl } = makeFetch([STATE_OK, TOKEN_OK, ACCOUNT_OK])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.status, 'complete')
+  for (const key of ['reason', 'detail', 'trace']) {
+    assert.equal(Object.keys(done).includes(key), false, `成功态不得含 ${key}`)
+  }
+  assertNoToken(JSON.stringify(done), '成功态 DTO')
+})

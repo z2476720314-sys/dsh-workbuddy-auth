@@ -752,9 +752,119 @@ test('登录操作失败 → ok:false + 错误码（含 error 状态），不泄
   assert.equal(body.status, 'error')
   assert.equal(body.error, 'WORKBUDDY_LOGIN_TIMEOUT')
   assert.equal(body.status, 'error')
-  assert.equal(Object.keys(body).includes('detail'), false, '未知字段一律丢弃')
+  assert.equal(Object.keys(body).includes('detail'), false, '字符串 detail 不是诊断对象，一律丢弃')
   assertNoSecret(res.state.raw, 'POST /accounts/login（失败态）')
-  assert.equal(JSON.stringify(body).includes('C:\\Users'), false, '不得回显本地路径')
+  assert.equal(JSON.stringify(body).includes('C:\\private'), false, '不得回显本地路径')
+})
+
+// 诊断面（2026-10-13）：路由层是客户端能看到的最终形状，必须把服务侧攒下的
+// reason/detail/trace 投影过来（否则诊断在最后一跳被静默丢掉），
+// 同时用与 lib/web-login.mjs 同形的形状闸门挡住夹带路径的「错误名」。
+test('登录路由：失败诊断按白名单投影，路径样错误名与未知键一律丢弃', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps } = makeDeps({
+    startLogin: async () => ({
+      status: 'error',
+      region: 'cn',
+      error: 'WORKBUDDY_LOGIN_POLL_FAILED',
+      progress: '登录报文里的域 www.example-alien.cn 不在本次地区的白名单内，已按安全策略丢弃凭据（令牌未入库）。',
+      reason: 'region',
+      detail: { reason: 'region', domain: 'www.example-alien.cn', host: 'copilot.tencent.com', error: 'C:\\private\\secret-tokens.json' },
+      trace: [
+        { step: 'state', host: 'copilot.tencent.com', code: 0 },
+        { step: 'credential', reason: 'region', domain: 'www.example-alien.cn' },
+        { step: 'token', host: 'copilot.tencent.com', accessToken: SEC_A, state: 'state-1' },
+      ],
+    }),
+  })
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, LOGIN_START, { method: 'POST', body: { region: 'cn' } })
+  const body = res.jsonBody()
+
+  assert.equal(res.state.status, 200)
+  assert.equal(body.reason, 'region')
+  assert.equal(body.detail.reason, 'region')
+  assert.equal(
+    Object.keys(body.detail).includes('domain'),
+    false,
+    '未知域不进 DTO（域只认已知集合，`www.example-alien.cn` 不在其中）',
+  )
+  assert.equal(body.detail.host, 'copilot.tencent.com')
+  assert.equal(Object.keys(body.detail).includes('error'), false, '路径样错误名必须被形状闸门丢弃')
+  assert.equal(body.trace.length, 3)
+  assert.deepEqual(body.trace[0], { step: 'state', host: 'copilot.tencent.com', code: 0 })
+  assert.deepEqual(body.trace[1], { step: 'credential', reason: 'region' })
+  assert.deepEqual(body.trace[2], { step: 'token', host: 'copilot.tencent.com' }, '未知键（令牌/state）一律丢弃')
+  assertNoSecret(res.state.raw, 'POST /accounts/login（诊断）')
+  assert.equal(JSON.stringify(body).includes('C:\\private'), false, '不得回显本地路径')
+  assert.equal(JSON.stringify(body).includes('state-1'), false, 'state 值不得回显')
+})
+
+test('登录路由：数字 error、数字串业务码与未知域在最后一层也丢（三层同规则）', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps } = makeDeps({
+    startLogin: async () => ({
+      status: 'error',
+      region: 'cn',
+      error: 'WORKBUDDY_LOGIN_POLL_FAILED',
+      progress: '轮询授权结果时上游返回 HTTP 503。',
+      reason: 'http',
+      detail: {
+        step: 'token',
+        reason: 'http',
+        host: 'copilot.tencent.com',
+        httpStatus: 503,
+        code: '13800138000',
+        error: '13800138000',
+        domain: 'TOKENCANARY.example',
+      },
+      trace: [
+        { step: '../../etc/passwd', reason: 'http' },
+        { step: 'token', reason: 'network', error: 13800138000, code: 13800138000, host: 13800138000 },
+        { step: 'token', reason: 'network', at: 1791900000000 },
+      ],
+    }),
+  })
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, LOGIN_START, { method: 'POST', body: { region: 'cn' } })
+  const body = res.jsonBody()
+
+  assert.equal(res.state.status, 200)
+  // 白名单判定按 key：合法值（已知 host / 三位状态码）保留，其余字段整段丢弃。
+  assert.deepEqual(body.detail, { step: 'token', reason: 'http', host: 'copilot.tencent.com', httpStatus: 503 })
+  assert.equal(body.trace.length, 3)
+  assert.deepEqual(body.trace[0], { reason: 'http' })
+  assert.deepEqual(body.trace[1], { step: 'token', reason: 'network' })
+  assert.deepEqual(body.trace[2], { step: 'token', reason: 'network', at: 1791900000000 })
+  const rendered = JSON.stringify(body)
+  for (const canary of ['13800138000', 'TOKENCANARY', 'etc/passwd']) {
+    assert.equal(rendered.includes(canary), false, `不得回显 ${canary}`)
+  }
+})
+
+test('登录路由：成功态不追加诊断字段（不改变既有 DTO 形状）', async () => {
+  const { ctx, routes } = makeCtx()
+  const { deps } = makeDeps({
+    loginStatus: () => ({
+      status: 'complete',
+      region: 'cn',
+      progress: '授权完成',
+      reason: 'region',
+      detail: { reason: 'region', domain: 'www.example-alien.cn' },
+      trace: [{ step: 'state', host: 'copilot.tencent.com', code: 0 }],
+    }),
+  })
+  registerRoutes(ctx, deps)
+
+  const res = await call(routes, LOGIN_STATUS)
+  const body = res.jsonBody()
+
+  assert.equal(body.status, 'complete')
+  for (const key of ['reason', 'detail', 'trace']) {
+    assert.equal(Object.keys(body).includes(key), false, `成功态不得含 ${key}`)
+  }
 })
 
 test('登录路由：非 https 授权链接被投影丢弃（协议混淆挡在路由层）', async () => {

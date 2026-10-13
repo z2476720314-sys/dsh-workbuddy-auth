@@ -204,7 +204,10 @@ test('请求开始登录：POST accounts/login，body 只带 region，响应白�
   assert.equal(login.region, 'cn')
   assert.equal(login.authUrl, 'https://copilot.tencent.com/v2/plugin/auth?state=abc')
   assert.equal(login.progress, '等待浏览器授权')
-  assert.deepEqual(Object.keys(login).sort(), ['account', 'authUrl', 'completedAt', 'error', 'ok', 'progress', 'region', 'startedAt', 'status'])
+  assert.deepEqual(Object.keys(login).sort(), ['account', 'authUrl', 'completedAt', 'detail', 'error', 'ok', 'progress', 'reason', 'region', 'startedAt', 'status', 'trace'])
+  // 诊断面只认对象形状：字符串 detail（这里夹带令牌）一律降级为 null，不进 UI 数据。
+  assert.equal(login.detail, null)
+  assert.deepEqual(login.trace, [])
   assert.deepEqual(Object.keys(login.account).sort(), ['id', 'nickname', 'phoneMasked', 'sourceId', 'uidTail'])
   assert.equal(JSON.stringify(login).includes(TOK_A), false)
 })
@@ -424,5 +427,5 @@ test('SSR：登录中/成功/失败三态只渲染白名单字段，且不渲染
 
   const combined = pending + complete + failed
   assert.doesNotMatch(combined, new RegExp(TOK_A))
-  assert.doesNotMatch(combined, /C:\\Users|Tencent-Cloud\.coding-copilot\.info/)
+  assert.doesNotMatch(combined, /C:\\private|Tencent-Cloud\.coding-copilot\.info/)
 })

@@ -218,22 +218,62 @@ test('企业余额：limitNum/credit 的无效或负值按 0，但权威 remaini
   )
 })
 
-test('非 2xx、非 JSON、缺 data 或缺个人 Packages 都返回 unavailable，不以 0 冒充成功', async () => {
+// —— 2026-10-13 错误分类（Task：余额失败不再统一叫 unavailable）——
+// 已知一类（region 不支持 / 凭据缺失）保持 unavailable；
+// 真正发过请求的失败按阶段收敛为三种稳定枚举：
+//   auth-rejected     上游 401/403 —— 凭据被拒，行动 = 重新登录该账号
+//   request-failed    网络错误 / 超时 / 其他非 2xx（如 5xx）—— 行动 = 稍后重试
+//   upstream-invalid  2xx 但报文无法解析成余额 —— 行动 = 看上游报文
+// 必须是稳定枚举字符串，不携带上游原文，不携带 token。
+
+test('上游 401/403：收敛为 auth-rejected（其余非 2xx 收敛为 request-failed）', async () => {
+  const statuses = [[401, 'auth-rejected'], [403, 'auth-rejected'], [500, 'request-failed'], [503, 'request-failed']]
+  for (const [status, expected] of statuses) {
+    const result = await fetchCreditBalance({
+      record: record({ uid: `${UID}-http-${status}` }),
+      fetchImpl: spyFetch(async () => jsonResponse({ data: { Packages: [{ CycleTotalCapacity: '1', CycleRemainCapacity: '1', CycleUsedCapacity: '0' }] } }, status)),
+      now: T0 + 10,
+    })
+    assert.equal(result.ok, false)
+    assert.equal(result.error, expected)
+  }
+})
+
+test('网络层失败（fetch 抛出 / abort）：收敛为 request-failed，不携带错误原文', async () => {
+  const result = await fetchCreditBalance({
+    record: record({ uid: `${UID}-network-throws` }),
+    fetchImpl: spyFetch(async () => { throw new Error(`ECONNRESET ${TOKCRD} ${UID}`) }),
+    now: T0 + 11,
+  })
+  assert.deepEqual(result, { ok: false, error: 'request-failed' })
+  assert.equal(JSON.stringify(result).includes('ECONNRESET'), false)
+  assert.equal(JSON.stringify(result).includes(TOKCRD.slice(8, 28)), false)
+})
+
+test('2xx 但报文无法解析（非 JSON / 缺 data / 缺 Packages）：收敛为 upstream-invalid', async () => {
   const cases = [
-    async () => jsonResponse({ data: { Packages: [] } }, 503),
     async () => ({ ok: true, status: 200, json: async () => { throw new SyntaxError('not json') } }),
     async () => jsonResponse({}),
     async () => jsonResponse({ data: {} }),
   ]
-
   for (const [index, respond] of cases.entries()) {
     const result = await fetchCreditBalance({
-      record: record({ uid: `${UID}-failure-${index}` }),
+      record: record({ uid: `${UID}-unusable-${index}` }),
       fetchImpl: spyFetch(respond),
-      now: T0 + 10 + index,
+      now: T0 + 12 + index,
     })
-    assert.deepEqual(result, { ok: false, error: 'unavailable' })
+    assert.deepEqual(result, { ok: false, error: 'upstream-invalid' }, `case ${index}`)
   }
+})
+
+test('凭据或 fetch seam 不可用时零网络调用并返回 unavailable', async () => {
+  const fetchImpl = spyFetch(async () => { throw new Error('must not run') })
+
+  for (const badRecord of [undefined, {}, { accessToken: '', uid: UID }, { accessToken: TOKCRD, uid: '' }]) {
+    assert.deepEqual(await fetchCreditBalance({ record: badRecord, fetchImpl, now: T0 + 20 }), { ok: false, error: 'unavailable' })
+  }
+  assert.equal(fetchImpl.calls.length, 0)
+  assert.deepEqual(await fetchCreditBalance({ record: record({ uid: `${UID}-no-fetch` }), fetchImpl: undefined, now: T0 + 21 }), { ok: false, error: 'unavailable' })
 })
 
 test('余额请求把精确 30s 超时信号交给 fetch，abort 后收敛为 unavailable', async () => {
@@ -251,7 +291,7 @@ test('余额请求把精确 30s 超时信号交给 fetch，abort 后收敛为 un
     }))
     const result = await fetchCreditBalance({ record: record({ uid: `${UID}-timeout` }), fetchImpl, now: T0 + 19 })
     assert.deepEqual(seen, [30_000])
-    assert.deepEqual(result, { ok: false, error: 'unavailable' })
+    assert.deepEqual(result, { ok: false, error: 'request-failed' })
     assert.equal(fetchImpl.calls.length, 1)
     assert.equal(JSON.stringify(result).includes(TOKCRD.slice(10, 30)), false)
   } finally {
@@ -315,10 +355,10 @@ test('60s TTL 内复用成功快照；过期刷新失败时返回最后成功值
   assertSafeSuccess(stale)
 })
 
-test('首次请求失败时没有旧快照，只返回固定 unavailable 且不泄漏错误或 token', async () => {
+test('首次请求失败时没有旧快照，只收敛为分类错误且不泄漏错误原文或 token', async () => {
   const fetchImpl = spyFetch(async () => { throw new Error(`ECONNRESET ${TOKCRD} ${UID}`) })
   const result = await fetchCreditBalance({ record: record({ uid: `${UID}-cold-failure` }), fetchImpl, now: T0 + 50 })
-  assert.deepEqual(result, { ok: false, error: 'unavailable' })
+  assert.deepEqual(result, { ok: false, error: 'request-failed' })
   assert.equal(JSON.stringify(result).includes(TOKCRD.slice(8, 28)), false)
 })
 
