@@ -487,6 +487,50 @@ test('令牌自述地区与流程不符：fail-closed 不入库', async () => {
   assert.deepEqual(await store.list(), [])
 })
 
+// 回归（2026-10-13 生产实测）：CN 网关授权后 token 端点返回的成功报文里
+// `data.domain` 是 `www.codebuddy.cn`（不是 copilot.tencent.com）。它必须是 CN，
+// 否则 parseCredential 判 apiOrigin=null 抛 WORKBUDDY_LOGIN_POLL_FAILED，
+// 而错误码只显示"登录初始化或轮询失败"，看不出是地区白名单漏了一个 CN 域。
+test('CN 登录成功：上游 domain 为 www.codebuddy.cn 的真实报文必须入库', async () => {
+  const clock = makeClock()
+  const { store } = makeStore()
+  const REAL_CN_TOKEN = {
+    json: {
+      code: 0,
+      msg: 'OK',
+      data: {
+        accessToken: TOKSYN,
+        refreshToken: REFRESH_TOKEN,
+        tokenType: 'Bearer',
+        expiresIn: 2418057,
+        refreshExpiresIn: 2590857,
+        sessionState: 'state-synthetic',
+        scope: 'openid profile offline_access email',
+        domain: 'www.codebuddy.cn',
+      },
+    },
+  }
+  const { fetchImpl, calls } = makeFetch([STATE_OK, PENDING, REAL_CN_TOKEN, ACCOUNT_OK])
+  const service = createWebLoginService({ store, fetchImpl, now: clock.now, setTimer: clock.setTimer, clearTimer: clock.clearTimer })
+
+  await service.start('cn')
+  const done = await settle(service, clock)
+
+  assert.equal(done.error, undefined, 'CN 报文不得被判为轮询失败')
+  assert.equal(done.status, 'complete')
+  assert.equal(done.account.region, 'cn')
+  assertNoToken(JSON.stringify(done), 'CN 真实报文登录完成响应')
+
+  const saved = (await store.list())[0]
+  assert.equal(saved.apiOrigin, CN_BACKEND, 'CN 令牌一律落 CN 网关')
+  assert.equal(saved.accessToken, TOKSYN)
+  assert.equal(saved.refreshToken, REFRESH_TOKEN)
+  // 账号资料请求仍发往 CN 网关，且 x-domain 用网关 host（不是报文里的 codebuddy.cn）
+  const account = calls.find((call) => call.url.endsWith('/v2/plugin/account'))
+  assert.equal(account.url, `${CN_BACKEND}/v2/plugin/account`)
+  assert.equal(account.init.headers['x-domain'], 'copilot.tencent.com')
+})
+
 test('状态接口只读本地状态：idle 时也返回 DTO', () => {
   const { store } = makeStore()
   const service = createWebLoginService({ store, fetchImpl: async () => ({ ok: true, status: 200, text: async () => '{}' }) })

@@ -3,6 +3,19 @@
 本文件记录 dsh-workbuddy-auth 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.1] - 2026-10-13
+
+### 修复
+
+- **浏览器登录在 CN 地区误报 `WORKBUDDY_LOGIN_POLL_FAILED`**：CN 网关在浏览器授权成功后签发的令牌报文里
+  `data.domain` 是 `www.codebuddy.cn`，而 `lib/origins.mjs` 的 CN 认证域白名单只认 `copilot.tencent.com`
+  与 `*.tencent.com`，`regionForAuthHost()` 对它返回 `null`，于是 `lib/web-login.mjs` 的地区 fail-closed
+  校验（`apiOrigin === null`）把**刚拿到的 CN 令牌**判死并丢弃。表现为「浏览器已经显示登录成功，
+  插件里却是登录失败」，且错误码只有一句「登录初始化或轮询失败」，看不出真实原因。
+  CN 白名单改为 `tencent.com` 与 `codebuddy.cn` 两个 apex（apex 自身与任意子域），与
+  `lib/checkin.mjs` 的 `CHECKIN_DEFAULT_DOMAIN` 保持一致。新增回归测试，用生产实测报文逐字复现
+  该场景（`test/origins.test.mjs`、`test/web-login.test.mjs`）。
+
 ## [0.3.0] - 2026-10-12
 
 ### 新增

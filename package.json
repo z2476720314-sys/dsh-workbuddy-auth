@@ -1,6 +1,6 @@
 {
   "name": "dsh-workbuddy-auth",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "type": "module",
   "description": "把本机 WorkBuddy（CodeBuddy）登录态桥接为 DSH 凭据引用 WORKBUDDY_ACCESS_TOKEN",
   "main": "lib/index.mjs",
@@ -53,6 +53,6 @@
   ],
   "license": "MIT",
   "scripts": {
-    "test": "node --test \"test/*.test.mjs\" test/client-smoke.mjs"
+    "test": "node --import ./test/fixtures/isolated-profile.mjs --test \"test/*.test.mjs\" test/client-smoke.mjs"
   }
 }

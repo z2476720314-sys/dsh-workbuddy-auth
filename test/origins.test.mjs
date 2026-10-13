@@ -34,8 +34,20 @@ test('regionForAuthHost：只认两个地区的认证域，伪装后缀不算', 
   assert.equal(regionForAuthHost(''), null)
 })
 
+// 回归（2026-10-13 生产实测报文）：CN 网关登录成功后 `data.domain` 是 `www.codebuddy.cn`。
+// 它必须归 CN，否则 parseCredential 的地区 fail-closed 校验会把刚签发的 CN 令牌判死，
+// 整条浏览器登录流程以 WORKBUDDY_LOGIN_POLL_FAILED 收场（令牌已到手却入不了库）。
+test('regionForAuthHost：codebuddy.cn 是 CN 认证域（登录成功报文实测）', () => {
+  assert.equal(regionForAuthHost('www.codebuddy.cn'), 'cn')
+  assert.equal(regionForAuthHost('codebuddy.cn'), 'cn')
+  assert.equal(regionForAuthHost('sub.codebuddy.cn'), 'cn')
+  assert.equal(regionForAuthHost('www.codebuddy.cn.evil.example.com'), null)
+  assert.equal(regionForAuthHost('notcodebuddy.cn'), null)
+})
+
 test('originForAuthHost：Intl 与其 apex 同源，未知域 null', () => {
   assert.equal(originForAuthHost('copilot.tencent.com'), CN_BACKEND)
+  assert.equal(originForAuthHost('www.codebuddy.cn'), CN_BACKEND)
   assert.equal(originForAuthHost('login.workbuddy.ai'), 'https://www.workbuddy.ai')
   assert.equal(originForAuthHost('codebuddy.ai'), 'https://www.codebuddy.ai')
   assert.equal(originForAuthHost('evil.example.com'), null)
