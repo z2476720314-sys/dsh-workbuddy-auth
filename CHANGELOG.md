@@ -3,6 +3,13 @@
 本文件记录 dsh-workbuddy-auth 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.3.3] - 2026-10-14
+
+### Fixed
+
+- Keep active credential reads, account identity and refresh writeback aligned with the managed representative after a same-identity browser login. Previously the current-account badge could show fresh managed credentials while reload and refresh still used a stale desktop file.
+- Resolve managed representatives before filtering expired or duplicate desktop entries, so hidden historical files never override fresh credentials for the same identity.
+
 ## [0.3.2] - 2026-10-13
 
 ### 修复

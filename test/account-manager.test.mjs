@@ -86,6 +86,38 @@ function managerFor(fixture, {
   })
 }
 
+for (const scenario of ['expired', 'deduplicated', 'late-login']) {
+  test(`merged source reads managed credentials: ${scenario}`, async () => {
+    const fx = makeFixture()
+    try {
+      writeDesktop(fx.authDir, DESKTOP_FILE, desktopRecord({
+        uid: 'uid-shared',
+        expiresAt: Date.now() + (scenario === 'expired' ? -DAY : 30 * DAY),
+      }))
+      const store = await makeStore(fx)
+      const manager = managerFor(fx, { store })
+      if (scenario === 'late-login') {
+        assert.equal(JSON.parse((await manager.readActive()).text).auth.accessToken, DESKTOP_TOKEN)
+      }
+      if (scenario === 'deduplicated') {
+        writeDesktop(fx.authDir, 'merged-newer.info', desktopRecord({ uid: 'uid-shared', expiresAt: Date.now() + 60 * DAY }))
+      }
+      const saved = await store.upsert(managedAccount({ uid: 'uid-shared' }))
+      const id = `managed:${saved.id}`
+      const active = await manager.readActive()
+      assert.equal(active.accountId, id)
+      assert.equal((await manager.describe()).activeId, id)
+      assert.equal(JSON.parse(active.text).auth.accessToken, MG_TOK)
+      assert.equal(JSON.parse(active.text).auth.refreshToken, MANAGED_REFRESH)
+      assert.equal(manager.context().accountId, id)
+      assert.equal(await manager.isActiveAccount(id), true)
+      assert.equal(await store.getActiveId(), null)
+    } finally {
+      rmSync(fx.home, { recursive: true, force: true })
+    }
+  })
+}
+
 /** 断言拒绝且错误信息不含本机路径（不回显路径）。 */
 async function assertRejectsSafely(promise, home) {
   await assert.rejects(promise, (error) => {
@@ -132,7 +164,15 @@ test('去重只在 region 与稳定 uid 同时一致时发生：同 region 同 u
   try {
     writeDesktop(fx.authDir, DESKTOP_FILE, desktopRecord({ uid: 'uid-shared', nickname: '桌面甲', phone: '13800000001' }))
     const store = await makeStore(fx, [managedAccount({ uid: 'uid-shared', displayName: '托管甲' })])
-    const described = await managerFor(fx, { store }).describe()
+    const manager = managerFor(fx, { store })
+    const described = await manager.describe()
+    assert.equal(await store.getActiveId(), null)
+    const active = await manager.readActive()
+    assert.equal(active.accountId, described.activeId)
+    assert.equal(JSON.parse(active.text).auth.accessToken, MG_TOK)
+    assert.equal(JSON.parse(active.text).auth.refreshToken, MANAGED_REFRESH)
+    assert.equal(manager.context().accountId, described.activeId)
+    assert.equal(await manager.isActiveAccount(active.accountId), true)
     assert.equal(described.sources.length, 1, '同 region + 同 uid 应合并为一条')
     assert.equal(described.sources[0].source, 'managed', '合并后的代表是托管记录')
   } finally {
