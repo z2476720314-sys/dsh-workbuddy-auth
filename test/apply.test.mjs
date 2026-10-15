@@ -27,6 +27,22 @@ const baseDeps = (over = {}) => ({
 
 const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
+/**
+ * 等文件出现并读到内容。全量测试并发时进程繁忙，落盘可能晚于固定延时；
+ * 「立即跑一轮」的语义是「不等第一个 tick」，不是「60ms 内必须写完」，故轮询到 2s 上限。
+ */
+async function waitForFile(file, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      return await readFile(file, 'utf8')
+    } catch (error) {
+      if (error.code !== 'ENOENT' || Date.now() > deadline) throw error
+    }
+    await delay(10)
+  }
+}
+
 /** 计数型 spy fetch：记录调用次数，绝不发真实请求。 */
 const spyFetch = (respond = async () => ({ ok: true, status: 200, text: async () => '{"data":{"accessToken":"new-tok"}}' })) => {
   const calls = []
@@ -672,7 +688,7 @@ test('apply 启动签到调度：立即跑一轮、周期为 CHECKIN_TICK_MS、d
 
     // 立即跑一轮的证据：空账号目录也要落 lastRunAt。只创建定时器而等第一个 tick 是不合格的
     // ——用户装上插件后要马上签到，而不是十分钟后。
-    const state = JSON.parse(await readFile(stateFile, 'utf8'))
+    const state = JSON.parse(await waitForFile(stateFile))
     assert.equal(state.enabled, true, '签到默认开启（用户可关，默认必须是开）')
     assert.ok(Number.isInteger(state.lastRunAt) && state.lastRunAt > 0, `启动后必须立即跑一轮并落 lastRunAt，实际状态：${JSON.stringify(state)}`)
     assert.equal(fake.calls.length, 0, '没有账号时签到不得发任何上游请求')
