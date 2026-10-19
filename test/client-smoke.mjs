@@ -1,10 +1,9 @@
 // 离线客户端冒烟：桩掉浏览器模块加载器与 fetch，不启动 dsh web、不发网络请求。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { dshHomeRoots } from './fixtures/react-roots.mjs'
+import { loadReact } from './fixtures/react-roots.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
@@ -14,35 +13,7 @@ const clientPath = join(pkgRoot, 'lib', 'client.js')
 const TOK_A = 'synthetic-access-token-must-never-render'
 const REFRESH_TOKEN = 'synthetic-refresh-token-must-never-render'
 
-function candidateRoots() {
-  const roots = []
-  if (process.env.DSH_SMOKE_REACT_ROOT) roots.push(process.env.DSH_SMOKE_REACT_ROOT)
-  roots.push(join(pkgRoot, 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'web', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'node_modules'))
-  roots.push(...dshHomeRoots())
-
-  const npxRoot = join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx')
-  if (existsSync(npxRoot)) {
-    for (const entry of readdirSync(npxRoot)) roots.push(join(npxRoot, entry, 'node_modules'))
-  }
-  return roots
-}
-
-function loadReact() {
-  for (const root of candidateRoots()) {
-    try {
-      const require = createRequire(join(root, 'resolve-baseline.cjs'))
-      return { React: require('react'), renderToStaticMarkup: require('react-dom/server').renderToStaticMarkup }
-    } catch {
-      // 换下一个本机依赖根；插件自身不打包 React。
-    }
-  }
-  throw new Error('找不到可用的 react/react-dom；可用 DSH_SMOKE_REACT_ROOT 指定依赖目录')
-}
-
-const { React, renderToStaticMarkup } = loadReact()
+const { React, renderToStaticMarkup } = loadReact(pkgRoot)
 
 function loadClient() {
   assert.ok(existsSync(clientPath), 'lib/client.js 必须存在')
@@ -75,25 +46,42 @@ function loadClient() {
 
 const clientExports = loadClient()
 
-function registerSection() {
-  let injectedSlot = null
-  let registered = null
+function registerSections() {
+  const injectedSlots = []
+  const registered = new Map()
   const ctx = {
     slots: {
       inject: (name, callback) => {
-        injectedSlot = name
+        injectedSlots.push(name)
         return callback()
       },
+      // 一个插件现在会注册**两个**设置卡分区（WorkBuddy 与智谱清言 Agent）。
+      // 因此按 id 收集而不是「最后一次覆盖」：后者会随注册顺序静默改变被断言的组件。
       register: (metadata, component) => {
-        registered = { metadata, component }
+        registered.set(metadata.id, { metadata, component })
         return () => {}
       },
     },
   }
   clientExports.apply(ctx)
-  assert.equal(injectedSlot, 'settings.section')
-  assert.ok(registered)
+  for (const name of injectedSlots) assert.equal(name, 'settings.section')
   return registered
+}
+
+function registerSection() {
+  const registered = registerSections()
+  const entry = registered.get('workbuddy')
+  assert.ok(entry, 'WorkBuddy 分区必须被注册')
+  return entry
+}
+
+// 单一入口之后，注册表里那**一张**座位渲染的是 SubscriptionHub（默认总览）。
+// 要断言详情页就得显式给 initialView —— 这也是 hub 为离线测试留的塞子。
+const WORKBUDDY_DETAIL = { view: 'detail', id: 'workbuddy' }
+const AGENTMORE_DETAIL = { view: 'detail', id: 'agentmore' }
+
+function renderDetail(registered, props) {
+  return renderToStaticMarkup(React.createElement(registered.component, props))
 }
 
 function normalStatus(overrides = {}) {
@@ -118,7 +106,7 @@ function normalStatus(overrides = {}) {
 
 function renderStatus(status) {
   const registered = registerSection()
-  return renderToStaticMarkup(React.createElement(registered.component, { initialStatus: status }))
+  return renderToStaticMarkup(React.createElement(registered.component, { initialView: WORKBUDDY_DETAIL, initialStatus: status }))
 }
 
 test('客户端惰性 bundle 注册 WorkBuddy settings.section 且导出离线测试 seam', () => {
@@ -134,8 +122,38 @@ test('客户端惰性 bundle 注册 WorkBuddy settings.section 且导出离线�
   assert.equal(registered.metadata.id, 'workbuddy')
   assert.equal(registered.metadata.order, 46)
   assert.equal(typeof registered.metadata.label, 'function')
-  assert.equal(registered.metadata.label(), 'WorkBuddy')
+  // 单一入口：座位标签是「订阅服务」，不再是某一家的名字。
+  assert.equal(registered.metadata.label(), '订阅服务')
   assert.equal(typeof registered.component, 'function')
+})
+
+test('只注册一张 settings.section 座位，两个订阅点在卡内切换', () => {
+  const registered = registerSections()
+  assert.equal(registered.size, 1, '单一入口：本插件只能占用一张设置页座位')
+  assert.deepEqual([...registered.keys()], ['workbuddy'])
+  const hub = clientExports.__test.SubscriptionHub
+  assert.equal(registered.get('workbuddy').component, hub)
+  assert.deepEqual(clientExports.__test.HUB_PROVIDERS.map((p) => p.id), ['workbuddy', 'agentmore'])
+})
+
+test('总览卡同时列出两个订阅点，并给出各自的一行说明', () => {
+  const registered = registerSection()
+  const html = renderToStaticMarkup(React.createElement(registered.component, { initialView: { view: 'overview' } }))
+  assert.match(html, /订阅服务/)
+  assert.match(html, /WorkBuddy/)
+  assert.match(html, /智谱清言 Agent/)
+  // 卡片是可点区域，语义上必须是 button 而不是 div。
+  assert.equal((html.match(/data-hub-provider=/g) ?? []).length, 2)
+})
+
+test('normalizeHubView：未知 id 与坏输入一律退回总览', () => {
+  const { normalizeHubView } = clientExports.__test
+  assert.deepEqual(normalizeHubView({ view: 'detail', id: 'agentmore' }), { view: 'detail', id: 'agentmore' })
+  // 指向已不存在的订阅点时必须退回总览，否则用户会被永久卡在一张空详情页上。
+  assert.deepEqual(normalizeHubView({ view: 'detail', id: 'ghost' }), { view: 'overview' })
+  assert.deepEqual(normalizeHubView(null), { view: 'overview' })
+  assert.deepEqual(normalizeHubView('nonsense'), { view: 'overview' })
+  assert.deepEqual(normalizeHubView({ view: 'detail' }), { view: 'overview' })
 })
 
 test('SSR 正常状态展示账号、紧凑积分、令牌、状态和三个动作，且绝不渲染令牌', () => {
@@ -217,8 +235,11 @@ test('SSR 保留语义结构、宿主主题 token、移动端重排、焦点与 
   const html = renderStatus(normalStatus())
   const css = clientExports.__test.styles
 
-  assert.match(html, /<section[^>]*aria-labelledby="workbuddy-settings-title"/)
-  assert.match(html, /<h3[^>]*id="workbuddy-settings-title"/)
+  // 详情页的标题元素归详情页页眉所有（`wb-hub-detail-title`）；卡片自己不再画页眉，
+  // 否则订阅点名会出现两行 —— 用户实测反馈的缺陷。
+  assert.match(html, /<section[^>]*aria-labelledby="wb-hub-detail-title"/)
+  assert.match(html, /<h4[^>]*id="wb-hub-detail-title"/)
+  assert.doesNotMatch(html, /id="workbuddy-settings-title"/)
   assert.match(html, /<dl[^>]*>[\s\S]*<dt>昵称<\/dt><dd>测试用户<\/dd>/)
   assert.match(css, /--dsw-alias-label-primary/)
   assert.match(css, /--dsw-alias-state-business-primary/)
@@ -228,6 +249,36 @@ test('SSR 保留语义结构、宿主主题 token、移动端重排、焦点与 
   assert.match(css, /focus-visible/)
   assert.match(css, /@media \(prefers-reduced-motion: reduce\)/)
   assert.doesNotMatch(css, /linear-gradient|radial-gradient/)
+})
+
+test('Section 单独挂载时仍保留自己的页眉（id 与 aria-labelledby 成对）', () => {
+  const { Section } = clientExports.__test
+  const html = renderToStaticMarkup(React.createElement(Section, { initialStatus: normalStatus() }))
+  assert.match(html, /<section[^>]*aria-labelledby="workbuddy-settings-title"/)
+  assert.match(html, /<h3[^>]*id="workbuddy-settings-title"[^>]*>WorkBuddy</)
+})
+
+test('两个订阅点都用官方图标，不是文字占位符，且总览与详情页都不重复渲染标题', () => {
+  const registered = registerSection()
+  const overview = renderToStaticMarkup(React.createElement(registered.component, { initialView: { view: 'overview' } }))
+  // 图标：内联 data URI（离线可用，不依赖外链域名）。
+  assert.equal((overview.match(/<img[^>]*src="data:image\/(svg\+xml|png);base64,/g) ?? []).length, 2)
+  // 原来的 "WB" / "GLM" 文字方块必须消失。
+  assert.doesNotMatch(overview, />WB</)
+  assert.doesNotMatch(overview, />GLM</)
+  // 两个图标必须不同（各自官方标识，而不是同一个占位图复用两次）。
+  const sources = [...overview.matchAll(/<img[^>]*src="(data:image\/[^"]+)"/g)].map((match) => match[1])
+  assert.equal(sources.length, 2)
+  assert.notEqual(sources[0], sources[1])
+
+  for (const [view, name] of [[WORKBUDDY_DETAIL, 'WorkBuddy'], [AGENTMORE_DETAIL, '智谱清言 Agent']]) {
+    const html = renderToStaticMarkup(React.createElement(registered.component, { initialView: view }))
+    // 重复标题的回归护栏：详情页里叫「名字」的**标题元素**只能有一个。
+    // （正文里出现品牌名是正常的，比如「正在读取 WorkBuddy 状态…」，那不是标题。）
+    const headings = [...html.matchAll(/<h[1-6][^>]*>([^<]*)<\/h[1-6]>/g)].map((match) => match[1])
+    assert.equal(headings.filter((text) => text === name).length, 1, `${name} 只应有一个同名标题`)
+    assert.match(html, /wb-settings__detail-mark[\s\S]*data:image\//)
+  }
 })
 
 test('requestStatus 使用同源 GET、白名单化 DTO，fetch 桩全程不联网', async () => {

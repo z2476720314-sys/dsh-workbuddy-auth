@@ -1,15 +1,14 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import { createRequire } from 'node:module'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { setImmediate as tick } from 'node:timers/promises'
 import test from 'node:test'
 
+import { loadReact } from './fixtures/react-roots.mjs'
+
 const root = dirname(dirname(fileURLToPath(import.meta.url)))
-const require = createRequire(join(process.env.DSH_SMOKE_REACT_ROOT || join(root, 'node_modules'), 'model-tests.cjs'))
-const React = require('react')
-const { renderToStaticMarkup } = require('react-dom/server')
+const { React, renderToStaticMarkup } = loadReact(root)
 const ROUTE = '/api/dsh-workbuddy-auth/models'
 const CANARY = 'synthetic-secret-must-never-render-123456'
 

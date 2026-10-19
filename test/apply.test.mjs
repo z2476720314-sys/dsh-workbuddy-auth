@@ -156,11 +156,14 @@ test('apply：启动读取失败只告警不抛错，日志无令牌，dispose �
   const ctx = {
     credentials: { set: async () => { setCalls += 1 } },
     logger: { info: (m) => infos.push(String(m)), warn: (m) => warnings.push(String(m)) },
-    // 收集**全部** effect 的 disposer：apply 现在注册三个副作用（上游 UA 修复 + 凭据同步轮询 + 自动签到），
+    // 收集**全部** effect 的 disposer：apply 现在注册五个副作用
+    // （上游 UA 修复 + 凭据同步轮询 + 自动签到 + agentmore 登录浏览器清理 + agentmore 适配器拆除），
     // 每个都必须在卸载时复原，只留最后一个会漏掉其余（并让包装层残留在 globalThis.fetch 上）。
+    // 后两个来自第二订阅点：sealedSeams() 显式注入隔离的 agentmore 账号库，
+    // 因此这一区在所有平台上都装配，计数不随分支漂移。
     effect: (fn) => { disposers.push(fn()) },
     // 设置卡路由走**声明式**依赖（`ctx.inject(['webServer'], cb)`，见 lib/index.mjs）。
-    // 本用例是非 web 组合：webServer 永不到来，回调不执行，因此 effect 恰好是三个。
+    // 本用例是非 web 组合：webServer 永不到来，回调不执行，因此 effect 恰好是五个。
     inject: () => ({ deps: ['webServer'] }),
   }
 
@@ -180,7 +183,7 @@ test('apply：启动读取失败只告警不抛错，日志无令牌，dispose �
     // 等告警落定而不是固定 delay：满负载跑整个套件时 30ms 不够（曾经因此假红过一次）。
     const deadline = Date.now() + 3000
     while (warnings.length === 0 && Date.now() < deadline) await delay(10)
-    assert.equal(disposers.length, 3, 'apply 必须把上游 UA 修复、凭据同步轮询与自动签到都注册为可回收副作用')
+    assert.equal(disposers.length, 5, 'apply 必须把上游 UA 修复、凭据同步轮询、自动签到与 agentmore 两处清理都注册为可回收副作用')
     assert.ok(disposers.every((d) => typeof d === 'function'), 'apply 必须通过 ctx.effect 注册可回收的副作用')
     assert.ok(warnings.length >= 1, '启动失败必须留下告警')
     assert.match(warnings[0], /startup failed/)
@@ -499,7 +502,7 @@ const makeApplyCtx = () => {
       logger: { info: (m) => infos.push(String(m)), warn: (m) => warnings.push(String(m)) },
       effect: (fn) => { disposers.push(fn()) },
       // 设置卡路由声明式依赖（lib/index.mjs）：本组用例不提供 webServer，
-      // 因此回调永不执行，effect 数仍是 3（UA 修复 + 凭据同步 + 自动签到）。
+      // 因此回调永不执行，effect 数仍是 5（UA 修复 + 凭据同步 + 自动签到 + agentmore 两处清理）。
       inject: () => ({ deps: ['webServer'] }),
     },
   }
@@ -521,7 +524,7 @@ test('apply 安装上游 UA 修复：写入日志、非目标域名零改动、�
   try {
     apply(ctx, missingCredentialConfig(), sealedSeams())
 
-    assert.equal(disposers.length, 3, 'UA 修复、凭据同步与自动签到都必须注册为可回收副作用')
+    assert.equal(disposers.length, 5, 'UA 修复、凭据同步、自动签到与 agentmore 两处清理都必须注册为可回收副作用')
     assert.notEqual(globalThis.fetch, fake, 'apply 必须把上游 UA 修复装到 globalThis.fetch 上')
     assert.ok(
       infos.some((m) => m.includes('user-agent') && m.includes('copilot.tencent.com') && m.includes('dsh-workbuddy/0.1')),

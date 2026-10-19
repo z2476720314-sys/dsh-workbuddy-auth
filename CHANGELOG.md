@@ -3,6 +3,81 @@
 本文件记录 dsh-workbuddy-auth 的版本变更。格式遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [0.5.6] - 2026-10-19
+
+### Fixed
+
+- WorkBuddy 同账号凭据同步或 token 续期打断在途模型目录读取时，在推理请求发送前重新读取一次完整目录与当前凭据，修复空作用域被误判为 `WORKBUDDY_ACCOUNT_CHANGED`。重读有次数上限，不重放已发送的推理请求；真正切号、切地区、退出及请求发送前的身份校验保持生效。
+
+## [0.5.5] - 2026-10-15
+
+### Fixed
+
+- **智谱清言对话必然失败，报 `AGENTMORE_STREAM_TRUNCATED` / `UNKNOWN`**（用户截图实测）。根因：凭据里的 `conversationId` 是空串（`lib/agentmore-store.mjs` 允许空值，登录流程也不写入），适配器把 `conversation_id: ""` 原样发给 `/chatglm/agent-api/stream`，而上游对这种请求回的是 **HTTP 200 + `application/json` `{"status":500,"message":"internal server error"}`**，不是 SSE。流消费层读到 EOF 却从未见到 `finish` 帧，于是抛 `AGENTMORE_STREAM_TRUNCATED`（502），界面显示「处理失败 / 本轮运行失败 / UNKNOWN」。逐字段验证：`conversation_id` 为空串、缺字段、`null` 三种写法上游行为完全一致（都 200+JSON 500），所以不能靠省略字段绕过，必须由插件先建会话。现在 `conversationId` 为空时先调 `POST /chatglm/agent-api/conversation` 取真实 id，再用它发起对话；建会话失败的原始错误直接透传（不再被误报成流截断）。历史已由 `flattenPrompt` 拍平进 prompt，换新会话不丢上下文（实测新会话仍能正确引用上一轮内容）。
+
+## [0.5.4] - 2026-10-18
+
+### Fixed
+
+- WorkBuddy 推理端点返回 `6004` 时，保留使用量限制与重置时间，按宿主 `QUOTA` 分类结束；不再丢失原因而显示 `PROVIDER_ERROR / UNKNOWN`，也不再为该限额自动重试。HTTP 与 SSE 错误使用同一映射；其余认证、限流、服务端错误保留分类和 HTTP 状态，原始错误正文不回显。
+- 清言账号已登录但尚无余额缓存时，`status()` 保持 `remaining: null`，复用已有可空数字转换；真实零余额仍显示 0。补齐 `null`、`undefined`、空字符串及真实零值回归。
+
+## [0.5.3] - 2026-10-18
+
+### Fixed
+
+- **已登录但积分显示 0**（用户实测）。三处缺陷叠加，任一处都足以让余额变成 0：① `lib/agentmore-service.mjs` 读 `result?.value`，而 `parseCreditBalance()` 返回的是 `{ remaining, display }`，取值恒为 `undefined` → `null`；② `lib/client.js` 用 `finiteNumber()` 投影该值，`Number(null) === 0` 把「取不到」画成「0 积分」（同文件早有 `nullableNumber()` 专为此写）；③ `lib/agentmore-login.mjs` 登录成功落盘时不含 `credits`，而 `service.status()` 刻意不探测上游、只读缓存，于是冷启动必然显示空。现在登录时顺手取一次余额落盘，服务层按 `remaining` 透出，客户端对 `null` 保持 `null`（界面显示「未取到」）。实测上游 `member_info.left_score` 是字符串 `"8784.58"`，解析链路本身没问题。
+- **上下文窗口被写成 128K，用户改不回 1M**（对应提问「模型配置确定是只能默认的 128K?」）。旧代码把官方文档的「最大输出 Tokens 128K」误当上下文窗口，GLM-5.3 的 1M 窗口被标成 128K；客户端 `modelUpdate()` 又有 `size > model.maxContextWindow` 的闸门，手填 1M 会被自己的覆盖校验挡回来。按官方文档（`docs.bigmodel.cn` 的 GLM-5.3 与 GLM-5.3-Flash）改为**上下文 1M / 最大输出 128K**。目录缓存版本升到 2，旧缓存（含 128000 与单档 `default`）整份失效，升级后立即生效。
+- **思考深度只剩一档**。上游 `reasoning_efforts` 是对象数组，档位 id 在 `am_effort`（`low` 快速 / `high` 深度 / `max` 极致，另有内部值 `effort: ''|'thinking'|'deep_thinking'`），旧实现读错字段并把三档压成单个 `default`，原生选择器因此只有一个选项。实测 `/stream` 的 `meta_data.reasoning_effort` 只认 `low` / `high` / `max`（发 `thinking`、`deep_thinking` 直接收到 error 帧、零回答），思考帧数随档位递增（0 / 10 / 14）证实生效。现在三档原样透出，默认 `max`。
+- **`am_switch` 被当成「已下架」，活取目录恒为空**。该项是**能力位**（`true` = 该模型在 Agent 模式下可用），实测两项真实模型都是 `am_switch:true` + `chat_switch:true`；旧代码 `if (entry.am_switch === true) continue` 把它们全过滤掉，于是 `catalogSource` 永远停在 `fallback`、缓存从不写盘，界面上看到的一直是内置列表而不是账号真实可用模型。改为只有显式 `false` 才剔除（真下架时上游会整条移除）。实测修复后 `catalogSource=live`、两条模型、缓存以 version 2 落盘。
+
+### Changed
+
+- `normalizeReasoningEffort()` 改为映射到上游三档：`none`/`minimal`/`low` → `low`，`medium`/`high` → `high`，`xhigh`/`max` → `max`，`default` 与未知值不发字段（交给上游默认）。上游没有「关闭思考」，最低档就是 `low`。
+- 删除适配器里 `maxTokens` 的死代码（只算不用，插件的 `/models` 契约从不透出 `defaultMaxTokens`）。
+
+## [0.5.2] - 2026-10-18
+
+### Fixed
+
+- **还没登录就被踢回插件并报「该账号是游客身份」**（用户实测）。实测 `agentmore.chatglm.cn` 打开后 3 秒内就会在**自己的子域**上写入一对游客 `chatglm_token` / `chatglm_refresh_token`，而用户正式登录后令牌写在 apex `chatglm.cn` 上。旧实现一轮询到「已有两枚 cookie」就去验证身份，得到 `is_guest=true` 随即把流程判成 `error` 并关窗 —— 用户刚看到登录框、还没输验证码，窗口就没了。现在游客态只是 `guestPending` 标记：流程保持 `running`、窗口不关、继续轮询，直到上游认出真账号。
+- **同名 cookie 跨域混配**。`Storage.getCookies` 的返回顺序不是契约：实测子域游客令牌排在 apex 真令牌之前，而旧实现只取第一个匹配（还从两个域各取一枚当一对），既可能选中游客令牌，也可能拼出「apex access + 子域 refresh」这种必然 401 的组合。新增 `cookieCandidates()`：apex 域优先、逐枚候选按**域**配对成完整凭据，取代原来的「各取一枚」。API 调用被拒（`INVALID_CREDENTIAL`）时换下一枚候选，而不是整轮重来。
+
+### Changed
+
+- **详情页不再重复标题**（用户实测反馈）。详情页页眉原本先画一个订阅点名的 `<h4>`，紧跟着详情卡自己又画一个同名 `<h3>`，同一名字连出两行。现在详情页统一给一个页眉（图标 + 名称 + 一行说明），卡片在 hub 里用 `inHub` 跳过自己的页眉；独立挂载时仍保留页眉，`aria-labelledby` 跟着分支指向真实存在的标题元素（否则读屏软件念不出标题）。
+- **每个订阅点显示官方图标**，取代原来的 "WB" / "GLM" 文字方块。图形逐字节取自官方站点（WorkBuddy：`www.workbuddy.ai` 的 `assets/logo.svg`；智谱清言：`chatglm.cn/favicon.ico`，实为 64×64 PNG），内联为 data URI —— Web 前端跑在 `dsh-app://` 与 loopback 下，外链图标要多一份域名许可，弱网或 CSP 收紧时还会变成破图。
+- 设置卡在游客态给出可执行的下一步（「请在已打开的窗口里点击『登录』…窗口会一直保留」），而不是让用户盯着「等待登录完成…」猜。
+
+## [0.5.1] - 2026-10-17
+
+### Changed
+
+- 两个订阅点合并为**单一入口**：设置页只占一张座位（标签「订阅服务」），进来先是总览卡，点某一项进入该订阅点的详情页，详情页顶部有「返回订阅总览」。与 `dsh-chatgpt-subscription` 的 hub 做法一致。此前注册了两个 `settings.section` 座位，导航里会显示两行，像是两个插件，并且多占一个全局排序槽位。
+
+### Fixed
+
+- **登录成功后界面永久停在「等待登录」**。`allCookies()` 发的是 `Network.getAllCookies`，但 `Network` 是 page 域方法，挂在浏览器级 CDP socket 上只会返回 `-32601 'Network.getAllCookies' wasn't found`；改用浏览器级可用的 `Storage.getCookies`。实测：`Storage.getCookies` 在浏览器级可用且能读回 `setCookies` 写入的值，`Network.getAllCookies` 只在 attach 出来的 session 内可用。
+- 同一故障的放大器：登录轮询把**所有**探测异常都当瞬时抖动 `.catch(() => false)` 吞掉，于是协议级编码错误的表现是界面永久卡死且没有任何线索。现在 CDP 协议错误被包成带 `code` 的 `Error`，`-32601` / `-32602` 标为 `permanent`，轮询遇到即收尾并显示「登录链路故障（原因）」，不再静默重试。
+- 新增 `test/browser-cdp.test.mjs`：锁住「浏览器级只能用 Storage 域」「永久错误必须立刻收尾」两条，防止同一 bug 复现。
+
+## [0.5.0] - 2026-10-16
+
+### Added
+
+- 新增第二订阅点 `agentmore`（智谱清言 Agent / chatglm.cn），与既有 WorkBuddy 订阅点并列：各自独立的账号库、凭据续期、积分读取与模型偏好，互不影响推理使用哪一边。
+- 登录走宿主自起浏览器 + cookie 轮询：宿主打开 `https://agentmore.chatglm.cn`，用户在窗口内登录 chatglm.cn，插件轮询 `chatglm_token` / `chatglm_refresh_token` 两枚 cookie 与 `chatglm-deid` 设备标识，成功后写入本机加密账号库。不依赖 OAuth 回环，也不读取用户浏览器的 Cookie 数据库。
+- 上游协议按 APK 反编译逐字实现：`md5(timestamp-nonce-salt)` 的 `X-Sign`、带校验位的 `X-Timestamp`、校时接口 `cur_ts` 的半 RTT 补偿，以及 `/chatglm/agent-api/stream` 的 SSE 增量差分。
+- 新增 `agentmore` 命名空间下 10 条 exact 路由（`/api/dsh-workbuddy-auth/agentmore/*`），覆盖状态、登录开始/查询/取消、账号列表/切换/移除、积分、模型读取/保存/刷新。
+
+### Fixed
+
+- `finiteNumber` / `numberOr` 把 `null` 折成 `0`，导致「服务端未返回余额」被显示成「余额确实是 0」。新增可空数字路径，未取到时显示「未取到」。
+- 模型窗口参数统一要求正安全整数；此前负数上下文覆盖会被原样透传给客户端，被当作「无限上下文」渲染。
+- `/agentmore/status` 的 `credits` 与 `models` 改为恒定存在，客户端无需临时判断块是否存在。
+- 目录请求超时先 `reject` 再 `abort`，避免 `abort` 让在飞 fetch 先以自身错误码失败、超时被误报成 `AGENTMORE_CATALOG_FAILED`。
+- 登录轮询期间「取消」按钮曾被 `busy` 恒真禁用到流程结束，用户中途放弃时点不动；取消与登录轮询改用独立锁，「本次登录已取消」为粘性标记，轮询下一次唤醒即退出，不再续请求。
+
 ## [0.4.5] - 2026-10-15
 
 ### Fixed

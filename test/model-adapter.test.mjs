@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { createWorkBuddyAdapter } from '../lib/model-adapter.mjs'
-import { credentialScope } from '../lib/model-catalog.mjs'
+import { createModelCatalog, credentialScope } from '../lib/model-catalog.mjs'
 
 const credential = { backend: 'https://fixture.invalid', region: 'cn', accountId: 'account-a', headers: { ['Authorization']: 'Bearer synthetic', 'X-User-Id': 'fixture-uid' } }
 const model = { id: 'fixture-model', name: 'Fixture', contextWindow: 32000, maxContextWindow: 128000, maxTokens: 8192, inputModalities: ['text', 'image'], reasoningEfforts: ['low', 'high'], defaultReasoningEffort: 'low' }
@@ -171,6 +171,74 @@ test('changed scope between catalog and call never sends old capabilities with n
   assert.equal(sent, false)
 })
 
+test('concurrent sessions continue after same-account credential updates during catalog refresh', async () => {
+  const entered = deferred(), gate = deferred(), sent = []
+  let active = credential
+  const catalog = createModelCatalog({ readCredential: async () => active, fetchImpl: async () => {
+    entered.resolve(); await gate.promise
+    return Response.json({ data: { models: [{ id: model.id, maxInputTokens: 32000 }] } })
+  } })
+  const f = fixture({ catalog, readCredential: async () => active,
+    beforeCall: async () => catalog.invalidate({ keepCache: true }),
+    fetchImpl: async (_url, request) => { sent.push(request); return response(['[DONE]']) },
+  })
+  const first = collect(f.adapter.stream(options))
+  await entered.promise
+  active = { ...credential, headers: { ...credential.headers, ['Authorization']: 'Bearer renewed-synthetic' } }
+  const second = collect(f.adapter.stream(options))
+  gate.resolve()
+  try {
+    const results = await Promise.all([first, second])
+    assert.ok(results.every((events) => events.at(-1)?.type === 'finish'))
+    assert.equal(sent.length, 2)
+    assert.ok(sent.every((request) => new Headers(request.headers).get('authorization') === 'Bearer renewed-synthetic'))
+  } finally { f.adapter.dispose() }
+})
+
+test('invalidated catalog recovery is bounded and never sends chat on an incoherent second snapshot', async () => {
+  let loads = 0
+  const f = fixture({ catalog: { load: async () => { loads++; return { models: [], scopeKey: null } } } })
+  await assert.rejects(collect(f.adapter.stream(options)), { code: 'WORKBUDDY_ACCOUNT_CHANGED' })
+  assert.equal(loads, 2)
+  assert.equal(f.captured(), undefined)
+})
+
+test('a real account switch during the first catalog read cannot redirect an existing request', async () => {
+  const entered = deferred(), gate = deferred()
+  let current = credential
+  const catalog = createModelCatalog({ readCredential: async () => current, fetchImpl: async () => {
+    entered.resolve(); await gate.promise
+    return Response.json({ data: { models: [{ id: model.id, maxInputTokens: 32000 }] } })
+  } })
+  const f = fixture({ catalog, readCredential: async () => current })
+  const pending = collect(f.adapter.stream(options))
+  await entered.promise
+  current = { ...credential, accountId: 'account-b' }
+  catalog.invalidate({ keepCache: true })
+  gate.resolve()
+  try {
+    await assert.rejects(pending, { code: 'WORKBUDDY_ACCOUNT_CHANGED' })
+    assert.equal(f.captured(), undefined)
+    assert.equal((await collect(f.adapter.stream(options))).at(-1)?.type, 'finish', 'a new invocation may use the selected account')
+  } finally { f.adapter.dispose() }
+})
+
+test('logout or another account during catalog recovery stops before chat dispatch', async () => {
+  for (const next of [null, { ...credential, accountId: 'account-b' }]) {
+    let loads = 0, current = credential
+    const f = fixture({
+      readCredential: async () => current,
+      catalog: { load: async () => {
+        if (++loads === 1) return { models: [], scopeKey: null }
+        current = next
+        return { models: [model], scopeKey: credentialScope(credential) }
+      } },
+    })
+    await assert.rejects(collect(f.adapter.stream(options)), { code: next === null ? 'WORKBUDDY_ACCOUNT_REQUIRED' : 'WORKBUDDY_ACCOUNT_CHANGED' })
+    assert.equal(f.captured(), undefined)
+  }
+})
+
 test('caller abort and unload release a header wait even if transport ignores cancellation', async () => {
   for (const mode of ['caller', 'unload']) {
     let ready, requestSignal, timer
@@ -226,7 +294,7 @@ for (const stage of ['beforeCall', 'settings', 'catalog', 'credential', 'attachm
         beforeCall: () => pause('beforeCall'),
         settings: { read: async () => { await pause('settings'); return preference() } },
         catalog: { load: async () => { await pause('catalog'); return { models: [model], scopeKey: credentialScope(credential) } } },
-        readCredential: async () => { await pause(++credentialReads === 1 ? 'credential' : 'finalCredential'); return credential },
+        readCredential: async () => { await pause(++credentialReads === 1 ? 'credential' : credentialReads === 3 ? 'finalCredential' : 'snapshotCredential'); return credential },
         attachments: { readImage: async () => { await pause('attachments'); return { ref: { mediaType: 'image/png' }, data: new Uint8Array([1, 2, 3]) } } },
         fetchImpl: async () => { requests++; return response([{ choices: [{ delta: { content: 'ok' }, finish_reason: 'stop' }] }, '[DONE]']) },
       })
@@ -291,6 +359,33 @@ test('reader transport carries an own sanitized failure payload for Host normali
     return true
   })
 })
+
+for (const streamed of [false, true]) {
+  test(`WorkBuddy 6004 quota preserves reset time and Host failure code (${streamed ? 'SSE' : 'HTTP'})`, async () => {
+    const payload = { code: 6004, msg: '您的使用量已超出频率限制，将在 2026-10-19 12:55:04 UTC+8 重置，sensitive-canary' }
+    const f = fixture({ fetchImpl: async () => streamed ? response([payload]) : new Response(JSON.stringify(payload), { status: 429 }) })
+    await assert.rejects(collect(f.adapter.stream(options)), (error) => {
+      assert.equal(error.code, 'QUOTA')
+      assert.match(error.message, /2026-10-19 12:55:04 UTC\+8/)
+      assert.equal(error.message.includes('sensitive-canary'), false)
+      assert.deepEqual(error.failure, { code: 'QUOTA', message: error.message, status: 429 })
+      return true
+    })
+  })
+}
+
+for (const [status, code] of [[401, 'INVALID_CREDENTIAL'], [403, 'INVALID_CREDENTIAL'], [429, 'RATE_LIMIT'], [503, 'SERVER'], [400, 'PROVIDER_ERROR']]) {
+  test(`HTTP ${status} is classified as ${code} without exposing response contents`, async () => {
+    const f = fixture({ fetchImpl: async () => new Response('sensitive-canary', { status }) })
+    await assert.rejects(collect(f.adapter.stream(options)), (error) => {
+      assert.equal(error.code, code)
+      assert.equal(error.failure.status, status)
+      assert.equal(error.failure.code, code)
+      assert.equal(error.message.includes('sensitive-canary'), false)
+      return true
+    })
+  })
+}
 
 test('reader rejection does not override concurrent caller cancellation', async () => {
   const entered = deferred(), controller = new AbortController()

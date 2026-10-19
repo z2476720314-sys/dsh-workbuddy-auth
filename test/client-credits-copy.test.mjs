@@ -1,11 +1,10 @@
 // 余额失败文案分层测试：credits.error 的三种已分类枚举在设置卡里必须各自给出可行动提示，
 // 未分类的 'unavailable' 维持原文案。复用 client-error-hint 的客户端加载方式，SSR 渲染全卡片。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { dshHomeRoots } from './fixtures/react-roots.mjs'
+import { loadReact } from './fixtures/react-roots.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
@@ -13,32 +12,7 @@ const here = dirname(fileURLToPath(import.meta.url))
 const pkgRoot = resolve(here, '..')
 const clientPath = join(pkgRoot, 'lib', 'client.js')
 
-function candidateRoots() {
-  const roots = []
-  if (process.env.DSH_SMOKE_REACT_ROOT) roots.push(process.env.DSH_SMOKE_REACT_ROOT)
-  roots.push(join(pkgRoot, 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'web', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'node_modules'))
-  roots.push(...dshHomeRoots())
-  const npxRoot = join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx')
-  if (existsSync(npxRoot)) {
-    for (const entry of readdirSync(npxRoot)) roots.push(join(npxRoot, entry, 'node_modules'))
-  }
-  return roots
-}
-
-function loadReact() {
-  for (const root of candidateRoots()) {
-    try {
-      const require = createRequire(join(root, 'resolve-baseline.cjs'))
-      return { React: require('react'), renderToStaticMarkup: require('react-dom/server').renderToStaticMarkup }
-    } catch { /* 换下一个本机依赖根 */ }
-  }
-  throw new Error('找不到可用的 react/react-dom；可用 DSH_SMOKE_REACT_ROOT 指定依赖目录')
-}
-
-const { React, renderToStaticMarkup } = loadReact()
+const { React, renderToStaticMarkup } = loadReact(pkgRoot)
 
 function loadClient() {
   const loaderRegistrations = []
@@ -62,12 +36,13 @@ const clientExports = loadClient()
 
 /** 渲染母体（注册设置卡 section），返回整卡 HTML。 */
 function renderCard(credits) {
-  let registered = null
+  const registered = new Map()
   const ctx = {
     slots: {
       inject: (name, callback) => callback(),
+      // 插件现在注册两个分区（workbuddy / agentmore），按 id 取才不会随注册顺序漂移。
       register: (metadata, component) => {
-        registered = { metadata, component }
+        registered.set(metadata.id, { metadata, component })
         return () => {}
       },
     },
@@ -80,7 +55,12 @@ function renderCard(credits) {
     token: { accessExpiresAt: 0, accessDaysLeft: 0, refreshExpiresAt: 0, refreshDaysLeft: 0, lastRefreshTime: 0 },
     state: { credentialReadable: true, userAgentFix: true, upstreamHost: 'copilot.tencent.com' },
   }
-  return renderToStaticMarkup(React.createElement(registered.component, { initialStatus: status }))
+  const section = registered.get('workbuddy')
+  assert.ok(section, 'WorkBuddy 分区必须被注册')
+  return renderToStaticMarkup(React.createElement(section.component, {
+    initialView: { view: 'detail', id: 'workbuddy' },
+    initialStatus: status,
+  }))
 }
 
 test('credits auth-rejected：文案指向重新登录，而不是说「上游未提供余额」', () => {

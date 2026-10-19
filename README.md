@@ -1,6 +1,77 @@
 # dsh-workbuddy-auth
 
-Windows 上的 DSH npm bundle：把本机 WorkBuddy（腾讯 CodeBuddy）登录态桥接给 DSH，并提供原生 `workbuddy` 模型供应商、模型管理面板与现有账号设置卡。
+Windows 上的 DSH npm bundle：提供两个订阅点——把本机 WorkBuddy（腾讯 CodeBuddy）登录态桥接给 DSH 的 `workbuddy` 供应商，以及使用智谱清言（chatglm.cn）账号的 `agentmore` 供应商，各带模型管理面板与账号设置卡。两者共用**一个设置入口**（「订阅服务」总览卡），点进去分别管理。
+
+## 0.5.4 错误原因与未知余额
+
+WorkBuddy 模型限额（上游 `6004`）现在显示实际原因和上游提供的重置时间；不会再只显示 `PROVIDER_ERROR / UNKNOWN`，也不会自动重复请求已用尽的额度。清言已登录但尚未取得余额时保持“未知”，真实余额 0 仍显示 0。
+
+## 0.5.3 积分不再显示 0、上下文窗口改回 1M
+
+**积分显示 0。** 上游 `member_info.left_score` 是字符串（实测 `"8784.58"`），`parseCreditBalance` 解析没问题，但下游三处各自把它抹掉：服务层读了不存在的 `result.value`（`parseCreditBalance` 返回的是 `remaining`），客户端把 `null` 交给 `finiteNumber()` 而 `Number(null) === 0`，登录成功时又没顺手落一次余额、冷启动只能读缓存。现在余额按上游原值透出，取不到就是「未取到」，不再是 0。
+
+**上下文窗口是 1M，不是 128K。** 旧值把官方文档里的「最大输出 Tokens 128K」当成了上下文窗口，于是 1M 上下文的 GLM-5.3 被标成 128K，用户手填覆盖值也会被 `size > maxContextWindow` 挡回来。现在按官方文档：GLM-5.3 与 GLM-5.3-Flash 都是 **1M 上下文 / 128K 最大输出**。目录缓存版本升到 2，旧缓存整份失效，升级后立刻显示正确数值。
+
+**思考深度恢复三档。** 上游 `reasoning_efforts` 是对象数组，档位 id 在 `am_effort`（`low` 快速 / `high` 深度 / `max` 极致）。旧实现读错字段、还把所有档位压成单个 `default`。实测 `/stream` 认的就是 `low`/`high`/`max`（发 `thinking`、`deep_thinking` 直接返回 error 帧），现在三档原样透出、默认 `max`。
+
+**目录活取恒为空。** `am_switch` 不是「已下架」，而是「该模型在 Agent 模式下可用」的能力位——实测两项真实模型都是 `true`。旧代码把它当剔除条件，于是每次活取都返回空数组，只能退回内置列表，账号真实可用的模型永远看不到。现在只有显式 `false` 才剔除；实测 `catalogSource` 从 `fallback` 变为 `live`，缓存按 version 2 正常落盘。
+
+## 0.5.2 游客态不再中断登录、官方图标、详情页去重标题
+
+三条都是实测反馈的问题。
+
+**还没登录就被踢回插件。** `agentmore.chatglm.cn` 打开后 3 秒内就会在**自己的子域**上写入一对游客 `chatglm_token` / `chatglm_refresh_token`（用户正式登录后，令牌写在 apex `chatglm.cn` 上）。旧实现一轮询到「两枚 cookie 齐了」就去验证身份，拿到 `is_guest=true` 立刻把流程判成失败并关窗——用户刚看到登录框、还没来得及输验证码，窗口就没了。现在游客只是 `guestPending` 标记：流程保持 `running`、窗口不关、继续轮询，卡片同时提示「当前仍是游客身份，请在已打开的窗口里完成登录」。
+
+**同名 cookie 跨域混配。** `Storage.getCookies` 的返回顺序不是契约（实测子域游客令牌排在 apex 真令牌之前），旧实现只取第一个匹配，还从两个域各取一枚当一对，既可能选中游客令牌，也可能拼出「apex access + 子域 refresh」这种必然 401 的组合。新增 `cookieCandidates()`：apex 域优先、逐枚候选按**域**配对，被拒就换下一枚。
+
+**详情页重复标题 + 文字方块图标。** 详情页页眉原本先画订阅点名的 `<h4>`，详情卡自己又画一个同名 `<h3>`；现在统一由页眉给图标、名称与一行说明，卡片在 hub 里跳过自己的页眉（独立挂载时仍保留，`aria-labelledby` 跟着分支走）。图标改为各家**官方**标识（WorkBuddy 的 `assets/logo.svg`、智谱清言的 `favicon.ico`），内联成 data URI：前端跑在 `dsh-app://` 与 loopback 下，外链图标要多一份域名许可，弱网或 CSP 收紧时还会变成破图。
+
+## 0.5.1 单一入口与登录修复
+
+设置页里本插件只占**一张**座位，标签「订阅服务」。进来先是总览卡（每张卡一个订阅点），点某一项进入该订阅点的详情页，详情页顶部有「返回订阅总览」。这与 `dsh-chatgpt-subscription` 的 hub 做法一致：多注册一张座位会在设置页导航里显示成两行、看起来像两个插件，而且多占一个全局排序槽位会把别家插件往后挤。
+
+同时修复了登录流程的一个致命 bug：抓 cookie 用的是 `Network.getAllCookies`，但 `Network` 是 **page 域**方法，挂在浏览器级 CDP socket 上只会返回 `-32601 'Network.getAllCookies' wasn't found`。改用浏览器级可用的 `Storage.getCookies`。此前该错误又被登录轮询当成瞬时抖动吞掉，所以用户看到的表现是「浏览器里登录成功了，卡片却永远停在等待登录」。现在协议级永久错误会立刻收尾并显示原因，不再静默重试。
+
+## 0.5.0 第二订阅点（智谱清言 Agent）
+
+插件容纳**两个订阅点**：`workbuddy`（WorkBuddy / CodeBuddy）与 `agentmore`（智谱清言 Agent / chatglm.cn）。两者在同一个设置入口内各自拥有账号库、凭据续期、积分读取和模型偏好；一边登录或切换账号不会影响另一边，也不会把推理流量从一边搬到另一边。两边的模型都注册为各自的 DSH 原生供应商，由原生模型选择器决定单次对话用谁。
+
+安装与更新方式不变（0.4.5 段落的 `dsh plugin add` 流程照旧），把包版本换成 0.5.3 即可。
+
+### 登录方式
+
+`agentmore` 不走 OAuth 回环，也不读取用户浏览器的 Cookie 数据库。流程是：
+
+1. 在设置卡点“登录”，宿主进程启动一个 Chromium（Chrome / Edge）窗口打开 `https://agentmore.chatglm.cn`。
+2. 用户在该窗口内正常登录 chatglm.cn（含扫码）。
+3. 插件轮询 profile 内的 `chatglm_token` 与 `chatglm_refresh_token`，并按**域**配对成候选凭据（`chatglm.cn` 上的优先于子域上的）；设备标识优先取 cookie `chatglm-deid`，否则读页面 `localStorage['chatglm-deid']`，两者都没有时生成一个随机 32 位十六进制串。
+4. 插件对每一枚候选请求 `/chatglm/user-api/user/info` 验证身份：命中真账号才写入本机加密账号库并关闭窗口。
+
+**游客态是中间态，不是失败。** 实测该页面在用户点“登录”之前就会在自己的子域上写入一对游客令牌。早期实现把“发现游客”直接判成登录失败并关窗，用户刚看到登录框就被踢出来（`该账号是游客身份，请先在 chatglm.cn 完成正式登录`）。现在游客只标记为 `guestPending`，窗口保持打开、流程继续轮询，直到上游认出真账号；设置卡此时会提示“当前仍是游客身份，请在已打开的窗口里完成登录”。
+
+轮询间隔 1.5 秒，30 秒后退避到 3 秒，整体上限 10 分钟。窗口开着时点“取消”会立刻停止轮询并关闭浏览器；**取消不受登录流程的忙碌态限制**，中途放弃随时可点。
+
+### 上游协议
+
+按 APK 反编译逐字实现，非公开接口，上游变更可能导致不可用：
+
+- `X-Sign = md5(timestamp + '-' + nonce + '-' + salt)`，salt 为 APK 内常量。
+- `X-Timestamp` 并非原始时间戳，倒数第二位被替换成“各位数字之和减该位再取模 10”的校验位。
+- 签名用的时间戳需与服务器一致，故调用前请求一次 `/chatglm/operation-api/config/cur_ts` 并按半 RTT 补偿；校时失败只是不补偿、照常发请求，不会拒绝服务。
+- 正文走 `POST /chatglm/agent-api/stream` 的 SSE，每帧 `content[].text` 是**到目前为止的全文**，由插件做差分转成增量。
+- 凭据距过期不足 5 分钟、或无 `exp` 且距上次刷新超过 30 分钟时自动续期，续期失败仅告警、沿用旧令牌继续尝试。
+
+### 配置与落盘
+
+模型偏好与账号库位于 `DSH_HOME/storages/`，按订阅点分文件，互不读写对方：`agentmore-accounts.dpapi`（加密账号，与 WorkBuddy 的 `workbuddy-accounts.dpapi` 并列）、`agentmore-models.json`（模型偏好，含 `enabled` / `enabledModelIds` / `defaultReasoningEffort` / `contextWindowOverrides`）与 `agentmore-models.cache`（仅模型元数据、时间与账号作用域摘要，不含令牌）。
+
+偏好语义与 WorkBuddy 侧一致：总开关开启不等于启用全部模型，**默认零勾选**；只有手动勾选并保存的模型才进入原生选择器；清空上下文输入框表示删除该模型覆盖值，不是填零；窗口参数必须是正安全整数，负值不会进入上游。
+
+### 与本机环境的边界
+
+- 上游是未公开接口，**没有真实账号令牌时无法端到端验收**；本仓库的测试全部基于夹具，覆盖协议签名、SSE 差分、工具桥、账号库、目录缓存、适配器行为、登录轮询与 HTTP 路由，但不代表某次真实调用已成功。
+- 需要可用的 Chrome 或 Edge。找不到浏览器时报告“未找到可用的 Chromium 浏览器”，不会静默失败。
+- 积分余额来自上游返回；上游未给出该字段时显示“未取到”，不显示成 0。
 
 ## 0.4.5 安装与更新
 
@@ -183,11 +254,19 @@ CLI 对底层 fs/Node/YAML 错误只输出封闭错误码对应的固定文案�
 - **自动签到**：默认开启，启动即跑一轮、之后每 10 分钟检查一次，只处理 CN 账号；设置卡提供开关与「立即签到」；
 - 浏览器响应不包含 token、refresh token、上游响应体或本地路径。
 
-本项目不提供聊天页脚的单次积分估算；余额仅采用 WorkBuddy 服务端返回的权威值。
+`agentmore`（智谱清言 Agent）是并列的第二订阅点，能力对等但不共享状态：
+
+- 独立账号库与模型偏好，与 WorkBuddy 的账号/偏好互不读写；切换一边不影响另一边；
+- 宿主自起 Chrome / Edge 完成登录，插件读该窗口的 cookie 与 `localStorage` 判定成功，不读取用户浏览器已有的 Cookie 数据库；
+- 按 APK 反编译逐字实现的请求签名、校时补偿与 SSE 增量解析；凭据临近过期自动续期；
+- 模型管理语义与 WorkBuddy 一致（默认零勾选、正安全整数窗口覆盖、`null` 表示删除覆盖）；
+- 积分余额取自上游；上游未给该字段时显示「未取到」，不显示成 0。
+
+本项目不提供聊天页脚的单次积分估算；余额仅采用上游服务端返回的权威值。
 
 ## 数据保留
 
-运行时会在 `$DSH_HOME/storages/` 下创建以下四类文件，卸载时**不自动删除**：
+运行时会在 `$DSH_HOME/storages/` 下创建以下文件，卸载时**不自动删除**：
 
 | 文件 | 内容 | 加密 |
 | --- | --- | --- |
@@ -195,8 +274,13 @@ CLI 对底层 fs/Node/YAML 错误只输出封闭错误码对应的固定文案�
 | `workbuddy-auth-checkin.json` | 签到开关、每账号的本地日期/次数/结果时间戳 | 明文，**不含任何令牌或路径** |
 | `workbuddy-auth-rejected.json` | 被上游 401/403 拒绝过的账号 id 摘要 | 明文，只存 id 摘要 |
 | `workbuddy-auth-models.json` | 供应商开关、已选 ID、默认思考深度与上下文覆盖 | 明文，不含凭据 |
+| `agentmore-accounts.dpapi` | 智谱清言账号池（含 access / refresh token、deviceId） | Windows 当前用户 DPAPI（整库加密） |
+| `agentmore-models.json` | 第二订阅点的开关、已选 ID、默认思考深度与上下文覆盖 | 明文，不含凭据 |
+| `agentmore-models.cache` | 模型目录元数据、时间与账号作用域摘要 | 明文，**不含令牌** |
 
-确认不再需要并停止相关宿主后，可删除对应文件；删除 `workbuddy-auth-models.json` 后模型偏好在下次加载恢复默认零勾选。`workbuddy-accounts.dpapi` 删除后登录添加的账号会消失（桌面 CodeBuddy 凭据不受影响），签到状态删除后会在下一轮重新统计当日状态。DPAPI 不可用（例如非 Windows）时不会回退明文存储——托管账号库与浏览器登录整块缺席，桌面凭据文件照常工作。
+`workbuddy` 与 `agentmore` 的文件名刻意分开，两边的账号库与偏好互不读写；删除其中一边的文件只影响该订阅点。
+
+确认不再需要并停止相关宿主后，可删除对应文件；删除 `workbuddy-auth-models.json` 或 `agentmore-models.json` 后模型偏好在下次加载恢复默认零勾选。`workbuddy-accounts.dpapi` / `agentmore-accounts.dpapi` 删除后对应订阅点已登录的账号会消失（桌面 CodeBuddy 凭据不受影响），签到状态删除后会在下一轮重新统计当日状态。DPAPI 不可用（例如非 Windows）时不会回退明文存储——托管账号库与浏览器登录整块缺席，桌面凭据文件照常工作。
 
 签到状态文件刻意用 `workbuddy-auth-checkin.json` 这个独立名字：`@eddyskywalker/dsh-chatgpt-subscription` 用的是 `workbuddy-checkin.json`，两者格式不同，同名会互相覆盖。
 
@@ -210,6 +294,8 @@ npm pack --dry-run
 ```
 
 真实上游冒烟脚本不属于默认测试，可能读取真实本机凭据并访问网络；普通开发、CI 和发布检查不要运行它。
+
+`npm test` 当前为 911 项（903 通过、8 跳过），其中 `agentmore` 分区 329 项。测试需要能解析到 `react` / `react-dom` 才能渲染设置卡，查找顺序见 `test/fixtures/react-roots.mjs`；本机 profile 的 junction 悬空时可用 `DSH_SMOKE_REACT_ROOT` 指定依赖目录。注意 `npm test` 的 `--import ./test/fixtures/isolated-profile.mjs` 不可省——它隔离 `DSH_PROFILE_DIR`，单跑某个 client 测试时若漏掉会因找不到 react 而误报失败。
 
 ## 安全
 

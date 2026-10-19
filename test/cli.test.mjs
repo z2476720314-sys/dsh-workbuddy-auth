@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { test } from 'node:test'
+import { after, test } from 'node:test'
 
 import { main } from '../bin/cli.mjs'
 import { loadTestYaml } from './fixtures/dsh-deps.mjs'
@@ -47,8 +47,28 @@ const LEGACY_SETTINGS = [
   '',
 ].join('\r\n')
 
+/**
+ * 本次测试文件创建的全部夹具根目录。
+ *
+ * 用 `after()` 统一回收而不是逐个用例 `t.after`：夹具函数的调用点有 70+ 处，
+ * 逐个登记必然漏掉新加的用例 —— 实测漏掉的代价是 `%TEMP%` 里累积 1316 个
+ * `dsh-workbuddy-cli-*` 目录。集中登记只需在 `fixture()` 里加一行，新增用例
+ * 自动被覆盖。
+ */
+const fixtureRoots = new Set()
+
+after(async () => {
+  const roots = [...fixtureRoots]
+  fixtureRoots.clear()
+  await Promise.all(roots.map((root) => rm(root, { recursive: true, force: true }).catch(() => {})))
+})
+
 async function fixture(options = {}) {
   const root = await mkdtemp(join(tmpdir(), 'dsh-workbuddy-cli-'))
+  // 每个夹具目录都登记一次，测试跑完统一删。
+  // 为什么不逐个用例 `t.after`：73 个用例里绝大多数不关心清理，逐个写必然漏；
+  // 实测漏掉的代价是 %TEMP% 里堆了 1316 个目录（最早从两天前开始，每跑一次测试多 73 个）。
+  fixtureRoots.add(root)
   const dshHome = join(root, 'dsh-home')
   const profileDir = join(dshHome, 'profiles', 'web')
   const localAppData = join(root, 'local-app-data')

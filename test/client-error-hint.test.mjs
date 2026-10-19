@@ -1,11 +1,10 @@
 // RED：设置卡错误提示必须优先显示服务端给的 hint（可行动），而不是把 `HTTP 500：HTTP 401`
 // 这种只有状态码的行甩给用户。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { dshHomeRoots } from './fixtures/react-roots.mjs'
+import { loadReact } from './fixtures/react-roots.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
@@ -14,32 +13,7 @@ const pkgRoot = resolve(here, '..')
 const clientPath = join(pkgRoot, 'lib', 'client.js')
 const TOKEN = 'synthetic-access-token-must-never-render'
 
-function candidateRoots() {
-  const roots = []
-  if (process.env.DSH_SMOKE_REACT_ROOT) roots.push(process.env.DSH_SMOKE_REACT_ROOT)
-  roots.push(join(pkgRoot, 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'web', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'node_modules'))
-  roots.push(...dshHomeRoots())
-  const npxRoot = join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx')
-  if (existsSync(npxRoot)) {
-    for (const entry of readdirSync(npxRoot)) roots.push(join(npxRoot, entry, 'node_modules'))
-  }
-  return roots
-}
-
-function loadReact() {
-  for (const root of candidateRoots()) {
-    try {
-      const require = createRequire(join(root, 'resolve-baseline.cjs'))
-      return { React: require('react'), renderToStaticMarkup: require('react-dom/server').renderToStaticMarkup }
-    } catch { /* 换下一个本机依赖根 */ }
-  }
-  throw new Error('找不到可用的 react/react-dom；可用 DSH_SMOKE_REACT_ROOT 指定依赖目录')
-}
-
-const { React, renderToStaticMarkup } = loadReact()
+const { React, renderToStaticMarkup } = loadReact(pkgRoot)
 
 function loadClient() {
   const loaderRegistrations = []

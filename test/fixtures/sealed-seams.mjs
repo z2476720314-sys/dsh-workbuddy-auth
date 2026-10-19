@@ -4,9 +4,15 @@
 // （`<DSH_HOME>/storages/workbuddy-accounts.dpapi`）。测试若不注入，就会**读本机真实账号池**：
 // 账号数断言随开发者本机状态漂移，最糟的情况是把真实 token 解密进测试进程。
 // 与既有约定一致（测试一律显式钉死 credentialFile），这里把托管库钉进临时目录。
+//
+// 第二订阅点（智谱清言）另有**三个**同样的真实路径（账号库 / 模型偏好 / 目录缓存），
+// 且它不依赖任何注入的服务就会装配，因此同样必须在这里全部钉死：
+// 不隔离就会读到本机真实的 agentmore 账号库，保存偏好的用例还会覆盖真实的模型选择。
 import { mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
+
+import { createAgentmoreStore } from '../../lib/agentmore-store.mjs'
 
 let sequence = 0
 
@@ -29,8 +35,8 @@ export function fakeProtector() {
  * `<DSH_HOME>/storages/workbuddy-auth-checkin.json`；不隔离就会污染开发者本机的真实状态
  * （测试的「今日已签到」断言也会随之漂移）。
  *
- * @param {{managedStore?:object,managedAccountsFile?:string,protector?:object,checkinStore?:object,checkinStateFile?:string}} [seams]
- * @returns {{managedStore?:object,managedAccountsFile?:string,protector?:object,checkinStore?:object,checkinStateFile?:string}}
+ * @param {{managedStore?:object,managedAccountsFile?:string,protector?:object,checkinStore?:object,checkinStateFile?:string,agentmoreStore?:object,agentmoreAccountsFile?:string,agentmoreProtector?:object,agentmoreModelSettingsFile?:string,agentmoreCatalogFile?:string}} [seams]
+ * @returns {object}
  */
 export function sealedSeams(seams = {}) {
   const dir = join(tmpdir(), `wb-auth-sealed-${process.pid}-${sequence++}`)
@@ -48,5 +54,18 @@ export function sealedSeams(seams = {}) {
     writeFileSync(filePath, JSON.stringify({ version: 1, enabled: false, lastRunAt: 0, accounts: {} }))
     isolated.checkinStateFile = filePath
   }
+  // 第二订阅点：**显式注入**隔离的空账号库，而不是让它自己按 `process.platform === 'win32'`
+  // 造一个真实路径上的库。这样既永不触碰真实路径，也让非 Windows 上照样装配这一区，
+  // 用例不随平台分支（否则 effect 计数断言会在非 win32 上变成另一套数字）。
+  if (seams.agentmoreStore === undefined && seams.agentmoreAccountsFile === undefined) {
+    isolated.agentmoreProtector = seams.agentmoreProtector ?? fakeProtector()
+    isolated.agentmoreAccountsFile = join(dir, 'storages', 'agentmore-accounts.dpapi')
+    isolated.agentmoreStore = createAgentmoreStore({
+      filePath: isolated.agentmoreAccountsFile,
+      protector: isolated.agentmoreProtector,
+    })
+  }
+  isolated.agentmoreModelSettingsFile ??= join(dir, 'storages', 'agentmore-models.json')
+  isolated.agentmoreCatalogFile ??= join(dir, 'storages', 'agentmore-catalog.json')
   return isolated
 }

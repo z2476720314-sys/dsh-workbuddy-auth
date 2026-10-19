@@ -32,7 +32,21 @@ const LOGIN_STATUS = '/api/dsh-workbuddy-auth/accounts/login/status'
 // 签到两条路由：settings 带体（readsBody），now 为手动触发。
 const CHECKIN_SETTINGS = '/api/dsh-workbuddy-auth/checkin/settings'
 const CHECKIN_NOW = '/api/dsh-workbuddy-auth/checkin/now'
-const ALL_PATHS = [
+// 第二订阅点（智谱清言）的 10 条路由，与 WorkBuddy 那 10 条并列在同一前缀下。
+const AM = '/api/dsh-workbuddy-auth/agentmore'
+const AGENTMORE_PATHS = {
+  status: `${AM}/status`,
+  login: `${AM}/login`,
+  loginStatus: `${AM}/login/status`,
+  loginCancel: `${AM}/login/cancel`,
+  accounts: `${AM}/accounts`,
+  accountActive: `${AM}/accounts/active`,
+  accountRemove: `${AM}/accounts/remove`,
+  credits: `${AM}/credits`,
+  models: `${AM}/models`,
+  modelsRefresh: `${AM}/models/refresh`,
+}
+const WORKBUDDY_PATHS = [
   STATUS,
   CONNECTION_TEST,
   CREDENTIAL_REFRESH,
@@ -44,6 +58,7 @@ const ALL_PATHS = [
   CHECKIN_SETTINGS,
   CHECKIN_NOW,
 ]
+const ALL_PATHS = [...WORKBUDDY_PATHS, ...Object.values(AGENTMORE_PATHS)]
 
 /** 同源请求头：Origin 的 host 与 Host 头一致（端口也必须一致）。 */
 const SAME_ORIGIN = { origin: 'http://127.0.0.1:3080', host: '127.0.0.1:3080' }
@@ -210,17 +225,20 @@ const NO_CALLS = {
   runCheckinNow: 0,
 }
 
-test('注册 10 条 exact 路由：前缀正确、路径逐字一致，并返回可回收的 disposer', () => {
+test('注册全部 exact 路由：前缀正确、路径逐字一致，并返回可回收的 disposer', () => {
   const { ctx, routes } = makeCtx()
   const { deps } = makeDeps()
 
   const dispose = registerRoutes(ctx, deps)
 
-  assert.equal(routes.length, ALL_PATHS.length)
-  assert.deepEqual(routes.map((r) => r.path).sort(), [...ALL_PATHS].sort())
+  // 本用例的 deps **不含** `agentmore`：第二订阅点在非 Windows / 未装配时必须整块缺席，
+  // 而不是注册一半、调用时才炸。因此这里只期望 WorkBuddy 的 10 条。
+  assert.equal(routes.length, WORKBUDDY_PATHS.length)
+  assert.deepEqual(routes.map((r) => r.path).sort(), [...WORKBUDDY_PATHS].sort())
   assert.ok(routes.every((r) => r.kind === 'exact'), '全部都必须是 exact 路由')
-  assert.ok(ALL_PATHS.every((p) => p.startsWith(`${ROUTE_PREFIX}/`)), '路径必须挂在约定的前缀下')
+  assert.ok(WORKBUDDY_PATHS.every((p) => p.startsWith(`${ROUTE_PREFIX}/`)), '路径必须挂在约定的前缀下')
   assert.equal(ROUTE_PREFIX, '/api/dsh-workbuddy-auth')
+  // WorkBuddy 那 10 条必须逐字不变：客户端 `normalizeStatus` 等解析器按这些路径硬编码。
   assert.deepEqual(ROUTE_PATHS, {
     status: STATUS,
     connectionTest: CONNECTION_TEST,
@@ -969,7 +987,7 @@ test('真 Cordis 形态：服务经 ctx.get("webServer") 读取（未声明 inje
   const { deps, calls } = makeDeps()
   registerRoutes(ctx, deps)
 
-  assert.equal(routes.length, ALL_PATHS.length)
+  assert.equal(routes.length, WORKBUDDY_PATHS.length)
   const res = await call(routes, CREDENTIAL_REFRESH, { method: 'POST' })
   assert.equal(res.state.status, 200)
   assert.equal(calls.refreshNow, 1)
@@ -1014,6 +1032,10 @@ function makeApplyCtx({ withWebServer = true, defer = false } = {}) {
   const warnings = []
   const webServer = makeWebServer()
   const pendingCallbacks = []
+  // 本插件现在声明**两组**声明式依赖：`['webServer']`（设置卡路由）与 `['llm']`
+  // （模型适配器注册）。断言「webServer 必须按名声明」而不是「唯一一次 inject 必须是
+  // webServer」——后者会把「以后再加一个依赖」误报成回归。
+  const injectedDeps = []
   const ctx = {
     credentials: { set: async () => {} },
     logger: {
@@ -1025,8 +1047,11 @@ function makeApplyCtx({ withWebServer = true, defer = false } = {}) {
     // 假 ctx 保持同一形状，这样「依赖晚到」用例与真实现的读取路径一致。
     get: (name) => (withWebServer && name === 'webServer' ? webServer : undefined),
     // 声明式依赖：真实 Cordis 返回 fiber，这里只需要「回调在依赖就绪时被调用一次」。
+    // 只投递 webServer：本夹具不提供 llm 服务，别的依赖按「永不到来」处理，
+    // 与真 Cordis 里 provider 缺席时的形状一致。
     inject: (deps, cb) => {
-      assert.deepEqual(deps, ['webServer'], 'apply 必须按名声明对 webServer 的依赖')
+      injectedDeps.push(deps)
+      if (!deps.includes('webServer')) return { deps, cb }
       if (defer) pendingCallbacks.push(cb)
       else if (withWebServer) cb(ctx)
       return { deps, cb }
@@ -1040,6 +1065,7 @@ function makeApplyCtx({ withWebServer = true, defer = false } = {}) {
     webServer,
     routes: webServer.routes,
     pendingCallbacks,
+    injectedDeps,
     /** 模拟 webServer 的 fiber 转为 ACTIVE：投递所有已登记的回调。 */
     deliverWebServer() {
       for (const cb of pendingCallbacks.splice(0)) cb(ctx)
@@ -1052,13 +1078,18 @@ test('apply：webServer 提供方晚于 apply 就绪时，路由最终仍被注�
   const realFetch = globalThis.fetch
   const fake = async () => ({ ok: true, status: 200, text: async () => '{}' })
   // defer: true —— apply 执行时 webServer 的 fiber 还没 ACTIVE（真实 Cordis 的并发创建形状）。
-  const { ctx, disposers, routes, pendingCallbacks, deliverWebServer } = makeApplyCtx({ withWebServer: true, defer: true })
+  const { ctx, disposers, routes, pendingCallbacks, injectedDeps, deliverWebServer } = makeApplyCtx({ withWebServer: true, defer: true })
 
   globalThis.fetch = fake
   try {
     apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-late-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 }, sealedSeams())
 
     assert.deepEqual(routes, [], '依赖未就绪时不得注册任何路由（这正是旧实现的失败点）')
+    // 关键机制：路由绝不能靠一次性 `ctx.get('webServer')` 判空（提供方晚 ACTIVE 时会静默全 404）。
+    assert.ok(
+      injectedDeps.some((deps) => Array.isArray(deps) && deps.includes('webServer')),
+      `apply 必须按名声明对 webServer 的依赖，实际声明：${JSON.stringify(injectedDeps)}`,
+    )
     assert.equal(pendingCallbacks.length, 1, 'apply 必须把路由注册登记为对 webServer 的声明式依赖')
 
     deliverWebServer() // webServer 的 fiber 转为 ACTIVE
@@ -1084,7 +1115,9 @@ test('apply：webServer 就绪时立即注册全部 exact 路由，卸载时全�
   try {
     apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-routes-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 }, sealedSeams())
 
-    assert.equal(disposers.length, 4, 'UA 修复 + 凭据同步 + 自动签到 + 设置路由，四者都必须可回收')
+    // 六者：UA 修复 + 凭据同步 + 自动签到 + 设置路由 + agentmore 登录浏览器清理 + agentmore 适配器拆除。
+    // 后两者来自第二订阅点；sealedSeams() 显式注入隔离账号库，故本区在所有平台都装配。
+    assert.equal(disposers.length, 6, 'UA 修复 + 凭据同步 + 自动签到 + 设置路由 + agentmore 两处清理，六者都必须可回收')
     assert.deepEqual(routes.map((r) => r.path).sort(), [...ALL_PATHS].sort())
 
     for (const d of disposers) d()
@@ -1107,7 +1140,8 @@ test('apply：非 web 组合里 webServer 永不到来时，不注册路由、�
     assert.doesNotThrow(() => apply(ctx, { credentialFile: join(tmpdir(), `wb-auth-noweb-${process.pid}-missing`, 'Tencent-Cloud.coding-copilot.info'), tickMs: 60_000 }, sealedSeams()))
 
     assert.deepEqual(routes, [], '没有 webServer 就不该注册任何路由')
-    assert.equal(disposers.length, 3, '降级路径不得新增 effect：UA 修复 + 凭据同步 + 自动签到仍必须照常挂上')
+    // 依赖永不 ACTIVE 时，路由回调不执行 → 比上一个用例少一个 effect（缺设置路由那条）。
+    assert.equal(disposers.length, 5, '降级路径不得新增 effect：UA 修复 + 凭据同步 + 自动签到 + agentmore 两处清理仍必须照常挂上')
     assert.equal(pendingCallbacks.length, 1, '依赖声明本身仍然登记（Cordis 里表现为 fiber 保持 PENDING，apply 其余部分不受影响）')
   } finally {
     for (const d of disposers) d?.()

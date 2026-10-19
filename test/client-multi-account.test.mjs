@@ -1,10 +1,9 @@
 // 设置卡多账号 UI 冒烟（离线 SSR）：账号选择器渲染与切换请求。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { dshHomeRoots } from './fixtures/react-roots.mjs'
+import { loadReact } from './fixtures/react-roots.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
@@ -13,34 +12,7 @@ const pkgRoot = resolve(here, '..')
 const clientPath = join(pkgRoot, 'lib', 'client.js')
 const TOK_A = 'synthetic-access-token-must-never-render'
 
-function candidateRoots() {
-  const roots = []
-  if (process.env.DSH_SMOKE_REACT_ROOT) roots.push(process.env.DSH_SMOKE_REACT_ROOT)
-  roots.push(join(pkgRoot, 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'web', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'node_modules'))
-  // 与 client-smoke.mjs 相同的兜底：本仓库独立运行（如 CI / npm 发布机）没有 profile
-  // 目录时，从 npx 缓存里找任意一份 react/react-dom —— 插件自身不打包 React。
-  const npxRoot = join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx')
-  if (existsSync(npxRoot)) {
-    for (const entry of readdirSync(npxRoot)) roots.push(join(npxRoot, entry, 'node_modules'))
-  }
-  roots.push(...dshHomeRoots())
-  return roots
-}
-
-function loadReact() {
-  for (const root of candidateRoots()) {
-    try {
-      const require = createRequire(join(root, 'resolve-baseline.cjs'))
-      return { React: require('react'), renderToStaticMarkup: require('react-dom/server').renderToStaticMarkup }
-    } catch { /* next root */ }
-  }
-  throw new Error('找不到可用的 react/react-dom；可用 DSH_SMOKE_REACT_ROOT 指定依赖目录')
-}
-
-const { React, renderToStaticMarkup } = loadReact()
+const { React, renderToStaticMarkup } = loadReact(pkgRoot)
 
 function loadClient() {
   assert.ok(existsSync(clientPath), 'lib/client.js 必须存在')
@@ -66,18 +38,28 @@ function loadClient() {
 const clientExports = loadClient()
 
 function registerSection() {
-  let registered = null
+  const registered = new Map()
   const ctx = {
     slots: {
       inject: (name, callback) => callback(),
+      // 插件现在注册两个分区（workbuddy / agentmore），按 id 取才不会随注册顺序漂移。
       register: (metadata, component) => {
-        registered = { metadata, component }
+        registered.set(metadata.id, { metadata, component })
         return () => {}
       },
     },
   }
   clientExports.apply(ctx)
-  return registered
+  const section = registered.get('workbuddy')
+  assert.ok(section, 'WorkBuddy 分区必须被注册')
+  // 单一入口之后这张座位渲染的是 SubscriptionHub（默认总览）。把组件包成
+  // 「直接落在 WorkBuddy 详情页」的薄垫片，本文件所有断言都不必改动。
+  const hub = section.component
+  section.component = (props = {}) => React.createElement(hub, {
+    initialView: { view: 'detail', id: 'workbuddy' },
+    ...props,
+  })
+  return section
 }
 
 /** 账号选择器的离线数据夹具：全部明显虚构。 */

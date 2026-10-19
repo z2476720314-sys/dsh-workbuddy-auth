@@ -1,11 +1,10 @@
 // 登录失败反馈：设置卡要说清「下一步做什么 + 哪一步 / 哪台上游 / 什么时候」，
 // 而不是只甩一个 WORKBUDDY_LOGIN_POLL_FAILED。诊断字段一律脱敏（令牌 / state / 路径不进 UI）。
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
-import { createRequire } from 'node:module'
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { dshHomeRoots } from './fixtures/react-roots.mjs'
+import { loadReact } from './fixtures/react-roots.mjs'
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
@@ -29,32 +28,7 @@ const clientPath = join(pkgRoot, 'lib', 'client.js')
 const TOKEN = 'synthetic-access-token-must-never-render'
 const STATE = 'state-4f8c-must-never-render'
 
-function candidateRoots() {
-  const roots = []
-  if (process.env.DSH_SMOKE_REACT_ROOT) roots.push(process.env.DSH_SMOKE_REACT_ROOT)
-  roots.push(join(pkgRoot, 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'profiles', 'web', 'node_modules'))
-  roots.push(resolve(pkgRoot, '..', '..', 'node_modules'))
-  roots.push(...dshHomeRoots())
-  const npxRoot = join(process.env.LOCALAPPDATA ?? '', 'npm-cache', '_npx')
-  if (existsSync(npxRoot)) {
-    for (const entry of readdirSync(npxRoot)) roots.push(join(npxRoot, entry, 'node_modules'))
-  }
-  return roots
-}
-
-function loadReact() {
-  for (const root of candidateRoots()) {
-    try {
-      const require = createRequire(join(root, 'resolve-baseline.cjs'))
-      return { React: require('react'), renderToStaticMarkup: require('react-dom/server').renderToStaticMarkup }
-    } catch { /* 换下一个本机依赖根 */ }
-  }
-  throw new Error('找不到可用的 react/react-dom；可用 DSH_SMOKE_REACT_ROOT 指定依赖目录')
-}
-
-const { React, renderToStaticMarkup } = loadReact()
+const { React, renderToStaticMarkup } = loadReact(pkgRoot)
 
 function loadClient() {
   const loaderRegistrations = []
