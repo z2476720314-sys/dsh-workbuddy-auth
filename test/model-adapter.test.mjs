@@ -52,6 +52,10 @@ test('real Host registration advertises and resolves selected WorkBuddy models',
     const info = await runtime.resolveModelInfo('workbuddy', model.id)
     assert.equal(info.id, model.id)
     assert.equal(info.provider, 'workbuddy')
+    const image = { width: 8000, height: 4000, bytes: 8000000 }
+    const target = runtime.imageRequestTarget('workbuddy', model.id, image)
+    assert.equal(target.maxBytes, 1048576)
+    assert.ok(target.width * target.height <= 4194304)
     assert.equal(f.captured(), undefined)
     f.settings({ ...preference(), enabledModelIds: [] })
     assert.deepEqual(await runtime.listModels('workbuddy'), [])
@@ -150,6 +154,67 @@ test('images, assistant calls, tool results and schema become upstream input wit
   assert.equal(body.messages[2].tool_calls[0].function.arguments, '{"q":1}')
   assert.equal(body.messages[3].tool_call_id, 'call_fixture')
   assert.equal(body.tools[0].function.parameters.$schema, undefined)
+})
+
+test('offloaded images retain a recovery handle without rereading or resending image bytes', async () => {
+  let reads = 0
+  const ref = { attachmentId: 'fixture-old-image', mediaType: 'image/png', width: 1600, height: 1000, bytes: 2000000 }
+  const f = fixture({ attachments: { readImage: async () => { reads++; throw new Error('must not read') }, imageHostPath: () => '/synthetic/old-image.png' } })
+  await collect(f.adapter.stream({ ...options, messages: [{ role: 'user', content: [{ type: 'image', attachment: ref, offloaded: true }] }] }))
+  assert.equal(reads, 0)
+  const content = f.captured().body.messages[0].content
+  assert.equal(typeof content, 'string')
+  assert.match(content, /fixture-old-image/)
+  assert.match(content, /\/synthetic\/old-image\.png/)
+  assert.equal(JSON.stringify(f.captured().body).includes('image_url'), false)
+})
+
+test('request image versions are bounded, deduplicated and describe their preview dimensions', async () => {
+  const ref = { attachmentId: 'fixture-request-image', mediaType: 'image/png', width: 8000, height: 4000, bytes: 8000000 }
+  let requests = 0, expectedTarget
+  const f = fixture({ attachments: {
+    readImage: async () => { throw new Error('must use request version') },
+    readImageRequest: async (value, target, signal) => {
+      requests++; assert.equal(value, ref); assert.equal(signal.aborted, false)
+      assert.deepEqual(target, expectedTarget)
+      assert.ok(target.width * target.height <= 4194304); assert.equal(target.maxBytes, 1048576)
+      return { data: new Uint8Array([1, 2, 3]), mediaType: 'image/webp', bytes: 3, width: target.width, height: target.height }
+    },
+  } })
+  expectedTarget = f.adapter.imageRequestTarget('workbuddy', model.id, ref)
+  await collect(f.adapter.stream({ ...options, messages: [{ role: 'user', content: [{ type: 'image', attachment: ref }, { type: 'image', attachment: ref }] }] }))
+  assert.equal(requests, 1)
+  const content = f.captured().body.messages[0].content
+  assert.ok(content.filter(block => block.type === 'image_url').every(block => block.image_url.url === 'data:image/webp;base64,AQID'))
+  assert.match(content.find(block => block.type === 'text').text, /request preview/)
+})
+
+test('oversized image history asks Host to offload the oldest occurrences before sending chat', async () => {
+  const ref = { attachmentId: 'fixture-budget-image', mediaType: 'image/png', width: 1000, height: 1000, bytes: 1048576 }
+  const messages = Array.from({ length: 16 }, () => ({ role: 'user', content: [{ type: 'image', attachment: ref }] }))
+  const f = fixture({ attachments: { readImage: async () => ({ ref, data: new Uint8Array(1048576) }) } })
+  await assert.rejects(collect(f.adapter.stream({ ...options, messages })), error => {
+    assert.equal(error.code, 'IMAGE_OFFLOAD_REQUIRED')
+    assert.deepEqual(error.failure, { code: 'IMAGE_OFFLOAD_REQUIRED', message: 'WorkBuddy request images exceed the 20 MiB base64 budget.', offloadImages: 2 })
+    return true
+  })
+  assert.equal(f.captured(), undefined)
+  const offloaded = messages.map((message, index) => index < 2 ? { ...message, content: [{ ...message.content[0], offloaded: true }] } : message)
+  await collect(f.adapter.stream({ ...options, messages: offloaded }))
+  assert.equal(f.captured().body.messages.filter(message => Array.isArray(message.content)).length, 14)
+})
+
+test('parallel image tool results remain adjacent before their image user messages', async () => {
+  const f = fixture()
+  await collect(f.adapter.stream({ ...options, messages: [
+    { role: 'assistant', content: [
+      { type: 'tool-call', id: 'call_image_first', name: 'read_image', arguments: {} },
+      { type: 'tool-call', id: 'call_image_second', name: 'read_image', arguments: {} },
+    ] },
+    { role: 'tool', source: { kind: 'tool', callId: 'call_image_first' }, content: [{ type: 'text', text: 'first' }, { type: 'image', data: 'AQID', mediaType: 'image/png' }] },
+    { role: 'tool', source: { kind: 'tool', callId: 'call_image_second' }, content: [{ type: 'text', text: 'second' }, { type: 'image', data: 'BAUG', mediaType: 'image/png' }] },
+  ] }))
+  assert.deepEqual(f.captured().body.messages.map(message => message.role), ['assistant', 'tool', 'tool', 'user', 'user'])
 })
 
 test('errors and truncation are sanitized; abort cancels a hanging read', async () => {

@@ -138,6 +138,33 @@ test('unload cancels a running chat stream as well as unregistering the provider
   assert.equal(h.removed(), 1)
 })
 
+test('production image bridge binds request versions and offloaded recovery paths to the current service', async (t) => {
+  const ref = { attachmentId: 'fixture-request-image', mediaType: 'image/png', width: 8000, height: 4000, bytes: 8000000 }
+  let reads = 0, versions = 0
+  const service = {
+    async readImage() { reads++; throw new Error('request image version required') },
+    async readImageRequest(value, target, signal) {
+      assert.equal(this, service); assert.equal(value, ref); assert.equal(signal.aborted, false)
+      assert.ok(target.width * target.height <= 4194304)
+      versions++
+      return { data: new Uint8Array([1, 2, 3]), mediaType: 'image/webp', bytes: 3, width: target.width, height: target.height }
+    },
+    imageHostPath(value) { assert.equal(this, service); assert.equal(value, ref); return '/synthetic/source-image.png' },
+  }
+  const h = await harness(t, { attachments: service })
+  h.ctx.fs = { processPathFromHostPath(path) { assert.equal(path, '/synthetic/source-image.png'); return '/readonly/source-image.png' } }
+  await h.call('/models', 'POST', { enabledModelIds: ['fixture-model'] })
+  const send = async offloaded => {
+    for await (const event of h.adapter().stream({ provider: 'workbuddy', model: 'fixture-model', messages: [{ role: 'user', content: [{ type: 'image', attachment: ref, offloaded }] }] })) {}
+    return JSON.parse(h.requests.findLast(request => request.url.endsWith('/v2/chat/completions')).body)
+  }
+  const normal = await send(false)
+  assert.equal(normal.messages[0].content.find(block => block.type === 'image_url').image_url.url, 'data:image/webp;base64,AQID')
+  const recovered = await send(true)
+  assert.match(recovered.messages[0].content, /\/readonly\/source-image\.png/)
+  assert.equal(reads, 0); assert.equal(versions, 1)
+})
+
 for (const state of ['absent', 'present', 'late', 'removed']) {
   test(`optional attachment ${state} uses the current bound image service and keeps text requests available`, async (t) => {
     const ref = { attachmentId: 'fixture-image', mediaType: 'image/png' }
